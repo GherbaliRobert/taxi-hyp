@@ -242,6 +242,7 @@ button, input, select, textarea { font: inherit; color: inherit; }
 
 .badge[data-status='free'] { background: #dcfce7; color: #166534; }
 .badge[data-status='busy'] { background: #ffedd5; color: #9a3412; }
+.badge[data-status='pending'] { background: #e0e7ff; color: #3730a3; }
 .badge[data-status='assigned'] { background: #fef3c7; color: #92400e; }
 .badge[data-status='arrived'] { background: #dbeafe; color: #1e40af; }
 .badge[data-status='in_progress'] { background: #ffedd5; color: #9a3412; }
@@ -368,6 +369,22 @@ button, input, select, textarea { font: inherit; color: inherit; }
 }
 
 .pickup-pin span { width: 12px; height: 12px; background: #fff; border-radius: 50%; }
+.pickup-pin.pending { background: #4f46e5; animation: pulse 1.6s ease-in-out infinite; }
+
+@keyframes pulse {
+  50% { box-shadow: 0 0 0 8px rgba(79, 70, 229, 0.25); }
+}
+
+/* Comanda trimisă șoferilor: cine a primit-o și ce a răspuns. */
+.offer-state, .sms-state { margin-top: 4px; padding: 6px 8px; border-radius: 6px; background: #eef2ff; color: #3730a3; }
+.offer-state.warn, .sms-state.warn { background: #fff7ed; color: #9a3412; }
+.sms-state.ok { background: #f0fdf4; color: #166534; }
+.offer-cars { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.offer-car { font-size: 12px; padding: 1px 6px; border-radius: 4px; background: #fff; border: 1px solid #c7d2fe; }
+.offer-car[data-response='declined'], .offer-car[data-response='expired'] { border-color: #fed7aa; color: #9a3412; text-decoration: line-through; }
+.offer-car[data-response='accepted'] { border-color: #86efac; color: #166534; font-weight: 600; }
+.ride-item.needs-attention { border-color: #fb923c; box-shadow: 0 0 0 2px rgba(251, 146, 60, 0.25); }
+.result-box.warn { background: #fff7ed; border-color: #fed7aa; }
 
 /* ---------- Pagina șoferului ---------- */
 
@@ -395,6 +412,17 @@ button, input, select, textarea { font: inherit; color: inherit; }
 .card > .btn-lg { margin-top: 12px; }
 
 .ride-card { border: 2px solid var(--accent-strong); background: #fffbeb; }
+.offers { display: flex; flex-direction: column; gap: 12px; border-radius: var(--radius); }
+.offers:empty { display: none; }
+.offer-card { border: 2px solid #4f46e5; background: #eef2ff; }
+.offer-card h2 { margin: 0; font-size: 18px; }
+.offer-card .address { font-size: 17px; font-weight: 700; margin: 6px 0; }
+.offer-card .grid { display: grid; grid-template-columns: 2fr 1fr; gap: 8px; }
+.offer-countdown { font-weight: 700; color: #3730a3; font-variant-numeric: tabular-nums; }
+.offer-progress { height: 6px; background: #c7d2fe; border-radius: 3px; overflow: hidden; margin: 10px 0; }
+.offer-progress span { display: block; height: 100%; background: #4f46e5; transition: width 1s linear; }
+.btn-accept { background: var(--free); border-color: #15803d; color: #fff; font-size: 18px; padding: 14px; }
+.btn-accept:hover { background: #15803d; }
 .ride-card h2 { margin: 0 0 4px; font-size: 18px; }
 .ride-card .address { font-size: 16px; font-weight: 600; margin: 6px 0; }
 .ride-card .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }

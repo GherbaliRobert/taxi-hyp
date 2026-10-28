@@ -2,6 +2,7 @@
 (function () {
   const CAR_STATUS_LABELS = { free: 'Liber', busy: 'Ocupat', offline: 'Deconectat' };
   const RIDE_STATUS_LABELS = {
+    pending: 'Se caută șofer',
     assigned: 'Mașină în drum',
     arrived: 'Mașina a sosit',
     in_progress: 'În cursă',
@@ -72,10 +73,11 @@
     });
   }
 
-  function pickupIcon() {
+  /** Pinul clientului; `variant` 'pending' = comandă care încă așteaptă un șofer. */
+  function pickupIcon(variant) {
     return L.divIcon({
       className: 'pickup-icon',
-      html: '<div class="pickup-pin"><span></span></div>',
+      html: '<div class="pickup-pin' + (variant ? ' ' + variant : '') + '"><span></span></div>',
       iconSize: [30, 40],
       iconAnchor: [15, 38],
     });

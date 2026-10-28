@@ -4,11 +4,15 @@ const Geo = require('../shared/geo');
 const { hashSecret: hashPin, verifySecret: verifyPin, isValidPin, hashToken } = require('./secret');
 
 const CAR_STATUSES = ['free', 'busy', 'offline'];
-const RIDE_STATUSES = ['assigned', 'arrived', 'in_progress', 'completed', 'cancelled'];
+const RIDE_STATUSES = ['pending', 'assigned', 'arrived', 'in_progress', 'completed', 'cancelled'];
 const FINISHED = new Set(['completed', 'cancelled']);
+// Linkul clientului funcționează doar cât timp mașina vine spre el sau clientul e în cursă.
+const LINK_STATUSES = new Set(['assigned', 'arrived', 'in_progress']);
 
 // Tranzițiile permise pentru statusul unei curse.
+// „pending” (se caută șofer) → „assigned” se face doar când un șofer acceptă (acceptOffer).
 const TRANSITIONS = {
+  pending: ['cancelled'],
   assigned: ['arrived', 'in_progress', 'completed', 'cancelled'],
   arrived: ['in_progress', 'completed', 'cancelled'],
   in_progress: ['completed', 'cancelled'],
@@ -20,8 +24,11 @@ const DRIVER_RIDE_STATUSES = new Set(['arrived', 'in_progress', 'completed']);
 
 const TRAIL_LENGTH = 30;
 const MIN_LOCATION_INTERVAL_MS = 500;
-// Cât timp după încheiere mai funcționează linkul clientului (arată „Cursa s-a încheiat”).
-const FINISHED_LINK_TTL_MS = 24 * 60 * 60 * 1000;
+// Cât timp rămân cursele încheiate în lista dispecerului.
+const RECENT_FINISHED_MS = 24 * 60 * 60 * 1000;
+// Cât timp are un șofer să accepte o comandă.
+const DEFAULT_OFFER_TIMEOUT_MS = 60 * 1000;
+const MAX_TARGETED_CARS = 50;
 // Ultima poziție a mașinii se salvează în baza de date cel mult o dată la atâtea ms.
 const POSITION_SAVE_INTERVAL_MS = 15 * 1000;
 // Traseul unei curse se salvează ca un punct la atâtea ms.
@@ -73,15 +80,18 @@ function importCars(repo, cars, now = Date.now()) {
  * 'car:revoked' (sesiunile șoferului trebuie închise: PIN schimbat sau mașină dezactivată).
  */
 class FleetStore extends EventEmitter {
-  constructor({ repo, avgSpeedKmh = 25, now = Date.now }) {
+  constructor({ repo, avgSpeedKmh = 25, offerTimeoutMs = DEFAULT_OFFER_TIMEOUT_MS, now = Date.now }) {
     super();
     this.repo = repo;
     this.now = now;
     this.avgSpeedKmh = avgSpeedKmh;
+    this.offerTimeoutMs = offerTimeoutMs;
     this.cars = new Map();
-    // Doar cursele active; cele încheiate se citesc din baza de date.
+    // Doar cursele active (inclusiv comenzile care așteaptă un șofer); cele încheiate se citesc din baza de date.
     this.rides = new Map();
     this.ridesByToken = new Map();
+    // id cursă -> ofertele trimise șoferilor (inclusiv cele cu răspuns), pentru cursele active.
+    this.offers = new Map();
 
     for (const record of repo.listCars()) {
       this.cars.set(record.id, this._carFromRecord(record));
@@ -89,7 +99,8 @@ class FleetStore extends EventEmitter {
     // După o repornire, cursele active continuă (linkurile clienților rămân valabile).
     for (const ride of repo.activeRides()) {
       this._trackRide(ride);
-      const car = this.cars.get(ride.carId);
+      this.offers.set(ride.id, repo.rideOffers(ride.id));
+      const car = ride.carId && this.cars.get(ride.carId);
       if (car) car.rideId = ride.id;
     }
   }
@@ -342,6 +353,7 @@ class FleetStore extends EventEmitter {
     } else if (!online && car.status !== 'offline') {
       car.status = 'offline';
       if (car.position) this.repo.saveCarPosition(car.id, car.position);
+      this._withdrawCarOffers(car.id);
     } else {
       return false;
     }
@@ -453,62 +465,235 @@ class FleetStore extends EventEmitter {
       return { ok: false, error: 'Mașina are o cursă activă' };
     }
     car.status = status;
+    if (status === 'busy') this._withdrawCarOffers(car.id);
     this.emit('car', car);
     return { ok: true };
   }
 
   // ---- Curse ----
 
-  /** `actor` este dispecerul care creează cursa: { userId, name }. */
-  createRide(input, actor) {
-    if (!input || typeof input !== 'object') return { ok: false, error: 'Date lipsă' };
+  _validateOrder(input) {
+    if (!input || typeof input !== 'object') return { error: 'Date lipsă' };
     const customerName = cleanText(input.customerName, 80);
     const phone = cleanText(input.phone, 30);
     const address = cleanText(input.address, 200);
     const notes = cleanText(input.notes, 300);
-    if (customerName === null || phone === null || address === null || notes === null) {
-      return { ok: false, error: 'Date invalide' };
-    }
-    if (!customerName) return { ok: false, error: 'Introduceți numele clientului' };
+    if (customerName === null || phone === null || address === null || notes === null) return { error: 'Date invalide' };
+    if (!customerName) return { error: 'Introduceți numele clientului' };
     const pickup = input.pickup;
-    if (!pickup || !Geo.isValidLatLng(pickup.lat, pickup.lng)) {
-      return { ok: false, error: 'Alegeți pe hartă locul de preluare' };
+    if (!pickup || !Geo.isValidLatLng(pickup.lat, pickup.lng)) return { error: 'Alegeți pe hartă locul de preluare' };
+    return { customerName, phone, address, notes, pickup: { lat: pickup.lat, lng: pickup.lng } };
+  }
+
+  /**
+   * Cui se trimite comanda: { mode: 'all' } (toate mașinile libere), { mode: 'nearest', count }
+   * (cele mai apropiate) sau { mode: 'car', carId } (o singură mașină).
+   */
+  _parseTarget(target) {
+    if (!target || target.mode === 'all') return { mode: 'all' };
+    if (target.mode === 'nearest' && Number.isInteger(target.count) && target.count > 0) {
+      return { mode: 'nearest', count: Math.min(target.count, MAX_TARGETED_CARS) };
     }
-    const car = this.cars.get(input.carId);
-    if (!car || !car.active) return { ok: false, error: 'Alegeți o mașină' };
-    if (car.status !== 'free' || car.rideId) {
-      return { ok: false, error: `Mașina ${car.plate} nu este liberă` };
+    if (target.mode === 'car' && typeof target.carId === 'string') {
+      const car = this.cars.get(target.carId);
+      if (!car || !car.active) return { error: 'Mașină inexistentă' };
+      if (car.status !== 'free' || car.rideId) return { error: `Mașina ${car.plate} nu este liberă` };
+      return { mode: 'car', carId: target.carId };
     }
+    return { error: 'Alegeți cui trimiteți comanda' };
+  }
+
+  /** Mașinile libere și conectate, cele mai apropiate de client primele. */
+  _offerCandidates(ride, target) {
+    const free = this._activeCars().filter((c) => c.status === 'free' && !c.rideId);
+    if (target.mode === 'car') return free.filter((c) => c.id === target.carId);
+    const byDistance = free
+      .map((car) => ({ car, distance: car.position ? Geo.distanceMeters(car.position, ride.pickup) : Infinity }))
+      .sort((a, b) => a.distance - b.distance)
+      .map((x) => x.car);
+    return target.mode === 'nearest' ? byDistance.slice(0, target.count) : byDistance;
+  }
+
+  /**
+   * Dispecerul introduce comanda clientului; aceasta ajunge la șoferi, iar primul care acceptă o primește.
+   * `actor` este dispecerul ({ userId, name }); `linkBase` e adresa publică a serverului pentru linkul din SMS.
+   */
+  createOrder(input, actor, { linkBase = '' } = {}) {
+    const data = this._validateOrder(input);
+    if (data.error) return { ok: false, error: data.error };
+    const target = this._parseTarget(input.target);
+    if (target.error) return { ok: false, error: target.error };
 
     const ts = this.now();
     const ride = {
       token: crypto.randomBytes(16).toString('base64url'),
-      customerName,
-      phone,
-      address,
-      notes,
-      pickup: { lat: pickup.lat, lng: pickup.lng },
-      carId: car.id,
-      carPlate: car.plate,
-      driverName: car.driver,
-      status: 'assigned',
+      ...data,
+      carId: null,
+      carPlate: '',
+      driverName: '',
+      status: 'pending',
       createdAt: ts,
       updatedAt: ts,
-      statusTimes: { assigned: ts },
+      statusTimes: { pending: ts },
       distanceM: 0,
       createdById: actor ? actor.userId : null,
       createdByName: actor ? actor.name : '',
       closedByName: '',
+      linkBase: String(linkBase).slice(0, 200),
+      sms: { status: '', detail: '', at: null },
     };
     ride.id = this.repo.insertRide(ride);
     this._trackRide(ride);
+    this.offers.set(ride.id, []);
+    const offeredTo = this._sendOffers(ride, target);
+    this.emit('ride', ride);
+    return { ok: true, ride, offeredTo };
+  }
+
+  /** Retrimite o comandă încă neacceptată (ex. toți au refuzat); ofertele vechi încă deschise se retrag. */
+  resendOrder(rideId, targetInput) {
+    const ride = this.rides.get(String(rideId));
+    if (!ride || ride.status !== 'pending') return { ok: false, error: 'Comanda nu mai așteaptă un șofer' };
+    const target = this._parseTarget(targetInput);
+    if (target.error) return { ok: false, error: target.error };
+    this._closeOffers(ride.id, 'withdrawn');
+    const offeredTo = this._sendOffers(ride, target);
+    this.emit('ride', ride);
+    return { ok: true, ride, offeredTo };
+  }
+
+  _sendOffers(ride, target) {
+    const ts = this.now();
+    const cars = this._offerCandidates(ride, target);
+    for (const car of cars) {
+      const offer = { rideId: ride.id, carId: car.id, offeredAt: ts, expiresAt: ts + this.offerTimeoutMs, response: null, respondedAt: null };
+      offer.id = this.repo.insertOffer(offer);
+      this.offers.get(ride.id).push(offer);
+      this.emit('offer', offer);
+    }
+    return cars.map((c) => c.id);
+  }
+
+  /** Răspunsul la o ofertă: accepted | declined | expired | taken | withdrawn. */
+  _answer(offer, response) {
+    offer.response = response;
+    offer.respondedAt = this.now();
+    this.repo.answerOffer(offer);
+    this.emit('offer', offer);
+  }
+
+  _openOffer(rideId, carId) {
+    const ts = this.now();
+    return (this.offers.get(rideId) || []).find((o) => o.carId === carId && o.response === null && o.expiresAt > ts) || null;
+  }
+
+  /** Închide ofertele încă fără răspuns ale unei comenzi (cele trecute de termen devin „expired”). */
+  _closeOffers(rideId, response) {
+    const ts = this.now();
+    for (const offer of this.offers.get(rideId) || []) {
+      if (offer.response === null) this._answer(offer, offer.expiresAt <= ts ? 'expired' : response);
+    }
+  }
+
+  /** Mașina nu mai poate primi comenzi (a acceptat alta, e ocupată sau deconectată). */
+  _withdrawCarOffers(carId, exceptRideId = null) {
+    for (const [rideId, list] of this.offers) {
+      if (rideId === exceptRideId) continue;
+      const open = list.filter((o) => o.carId === carId && o.response === null);
+      if (!open.length) continue;
+      open.forEach((o) => this._answer(o, 'withdrawn'));
+      const ride = this.rides.get(rideId);
+      if (ride) this.emit('ride', ride);
+    }
+  }
+
+  /** Șoferul acceptă comanda. Primul care acceptă o primește; ceilalți văd că a fost preluată. */
+  acceptOffer(rideId, carId) {
+    const ride = this.rides.get(String(rideId));
+    const car = this.cars.get(carId);
+    if (!car) return { ok: false, error: 'Mașină necunoscută' };
+    // Al doilea „Accept” al aceluiași șofer (ex. rețea lentă) nu e o eroare.
+    if (ride && ride.carId === carId) return { ok: true, ride };
+    if (!ride || ride.status !== 'pending') {
+      return { ok: false, error: ride ? 'Comanda a fost preluată de alt coleg' : 'Comanda nu mai este disponibilă' };
+    }
+    const offer = this._openOffer(ride.id, carId);
+    if (!offer) return { ok: false, error: 'Oferta a expirat' };
+    if (car.status !== 'free' || car.rideId) return { ok: false, error: 'Mașina nu este liberă' };
+
+    const ts = this.now();
+    this._answer(offer, 'accepted');
+    this._closeOffers(ride.id, 'taken');
+    this._withdrawCarOffers(car.id, ride.id);
+
+    ride.carId = car.id;
+    ride.carPlate = car.plate;
+    ride.driverName = car.driver;
+    ride.status = 'assigned';
+    ride.updatedAt = ts;
+    ride.statusTimes.assigned = ts;
+    this.repo.updateRide(ride);
     if (car.position) this._recordRideProgress(ride, { ...car.position, ts }, true);
 
     car.rideId = ride.id;
     car.status = 'busy';
     this.emit('car', car);
     this.emit('ride', ride);
+    this.emit('ride:accepted', ride);
     return { ok: true, ride };
+  }
+
+  declineOffer(rideId, carId) {
+    const offer = this._openOffer(String(rideId), carId);
+    if (!offer) return { ok: true };
+    this._answer(offer, 'declined');
+    const ride = this.rides.get(String(rideId));
+    if (ride) this.emit('ride', ride);
+    return { ok: true };
+  }
+
+  /** Rulat periodic: ofertele fără răspuns în timpul alocat expiră. */
+  expireOffers() {
+    const ts = this.now();
+    const touched = new Set();
+    for (const [rideId, list] of this.offers) {
+      for (const offer of list) {
+        if (offer.response === null && offer.expiresAt <= ts) {
+          this._answer(offer, 'expired');
+          touched.add(rideId);
+        }
+      }
+    }
+    for (const rideId of touched) {
+      const ride = this.rides.get(rideId);
+      if (ride) this.emit('ride', ride);
+    }
+  }
+
+  /** Comenzile oferite acum unei mașini (pentru aplicația șoferului). */
+  carOffers(carId) {
+    const result = [];
+    for (const [rideId, list] of this.offers) {
+      const offer = this._openOffer(rideId, carId);
+      const ride = this.rides.get(rideId);
+      if (offer && ride && ride.status === 'pending') result.push({ offer, ride });
+    }
+    return result.sort((a, b) => a.offer.offeredAt - b.offer.offeredAt);
+  }
+
+  /** Ofertele unei comenzi, cu numărul mașinii (pentru dispecer). */
+  rideOffers(rideId) {
+    const list = this.offers.get(String(rideId)) || this.repo.rideOffers(rideId);
+    return list.map((o) => ({ ...o, plate: this.cars.has(o.carId) ? this.cars.get(o.carId).plate : o.carId }));
+  }
+
+  /** Starea SMS-ului către client (sending | sent | simulated | failed | no_phone | invalid_phone). */
+  setRideSms(rideId, status, detail = '') {
+    const ride = this.getRide(rideId);
+    if (!ride) return;
+    ride.sms = { status, detail: String(detail).slice(0, 300), at: this.now() };
+    this.repo.saveRideSms(ride.id, ride.sms);
+    this.emit('ride', ride);
   }
 
   /**
@@ -531,12 +716,13 @@ class FleetStore extends EventEmitter {
     }
 
     const ts = this.now();
-    const car = this.cars.get(ride.carId);
+    const car = ride.carId ? this.cars.get(ride.carId) : null;
     ride.status = status;
     ride.updatedAt = ts;
     ride.statusTimes[status] = ts;
     if (FINISHED.has(status)) {
       ride.closedByName = actor && actor.role === 'driver' ? 'Șofer' : (actor && actor.name) || 'Dispecerat';
+      this._closeOffers(ride.id, 'withdrawn');
     }
     if (car && car.position) {
       // Kilometrajul pornește de la locul preluării clientului.
@@ -573,31 +759,29 @@ class FleetStore extends EventEmitter {
     return this.rides.get(String(rideId)) || this.repo.rideById(rideId);
   }
 
+  /** Cursa linkului de urmărire, doar cât timp e în desfășurare: după încheiere linkul dispare. */
   getRideByToken(token) {
     if (typeof token !== 'string' || !token) return null;
-    const active = this.ridesByToken.get(token);
-    if (active) return active;
-    const stored = this.repo.rideByToken(token);
-    // Linkurile curselor încheiate expiră după o zi.
-    if (!stored || this.now() - stored.updatedAt > FINISHED_LINK_TTL_MS) return null;
-    return stored;
+    const ride = this.ridesByToken.get(token);
+    return ride && LINK_STATUSES.has(ride.status) ? ride : null;
   }
 
   isFinished(ride) {
     return FINISHED.has(ride.status);
   }
 
-  /** Cursele active plus ultimele 20 încheiate în ultimele 24 de ore, cele mai noi primele. */
+  /** Cursele active (și comenzile în așteptare) plus ultimele 20 încheiate în ultimele 24 de ore. */
   listRides() {
     const active = [...this.rides.values()].sort((a, b) => b.createdAt - a.createdAt);
-    const finished = this.repo.recentFinished(this.now() - FINISHED_LINK_TTL_MS, 20);
+    const finished = this.repo.recentFinished(this.now() - RECENT_FINISHED_MS, 20);
     return [...active, ...finished];
   }
 
   /** Ce vede clientul pe pagina de urmărire — fără datele altor clienți sau ale flotei. */
   trackingView(ride) {
+    // După încheiere linkul nu mai arată nimic despre mașină sau șofer.
+    if (!LINK_STATUSES.has(ride.status)) return { ride: { status: ride.status }, car: null, distanceM: null, etaMin: null };
     const car = this.cars.get(ride.carId);
-    const finished = FINISHED.has(ride.status);
     const view = {
       ride: {
         status: ride.status,
@@ -611,8 +795,7 @@ class FleetStore extends EventEmitter {
         model: car ? car.model : '',
         driverFirstName: ride.driverName.split(/\s+/)[0],
         online: Boolean(car && car.status !== 'offline'),
-        // După încheierea cursei nu mai arătăm unde se află mașina.
-        position: finished || !car ? null : car.position,
+        position: car ? car.position : null,
       },
       distanceM: null,
       etaMin: null,
@@ -651,7 +834,8 @@ class FleetStore extends EventEmitter {
   _untrackRide(ride) {
     this.rides.delete(ride.id);
     this.ridesByToken.delete(ride.token);
+    this.offers.delete(ride.id);
   }
 }
 
-module.exports = { FleetStore, importCars, normalizePlate, CAR_STATUSES, RIDE_STATUSES };
+module.exports = { FleetStore, importCars, normalizePlate, CAR_STATUSES, RIDE_STATUSES, LINK_STATUSES };

@@ -6,6 +6,8 @@
 
   const PAGE_SIZE = 50;
   const EXPORT_LIMIT = 10000;
+  const OFFER_LABELS = { accepted: 'a acceptat', declined: 'a refuzat', expired: 'nu a răspuns', taken: 'preluată de altul', withdrawn: 'retrasă' };
+  const SMS_LABELS = { sent: 'trimis', simulated: 'simulat (fără furnizor de SMS)', failed: 'netrimis', no_phone: 'fără telefon', invalid_phone: 'număr invalid', sending: 'în curs' };
 
   let config;
   let map;
@@ -138,6 +140,8 @@
       ['Curse', stats.total, ''],
       ['Finalizate', stats.completed, ''],
       ['Anulate', stats.cancelled, cancelledPct],
+      ['Fără șofer', stats.unassigned, 'anulate înainte să le accepte cineva'],
+      ['Până la acceptare', UI.formatMinutes(stats.avgAcceptMs), 'timp mediu de la comandă'],
       ['Km cu clienți', UI.formatKm(stats.distanceM), ''],
       ['Așteptare medie', UI.formatMinutes(stats.avgPickupMs), 'de la comandă la sosire'],
       ['Durată medie', UI.formatMinutes(stats.avgRideMs), 'cu clientul în mașină'],
@@ -174,7 +178,7 @@
           ),
           el('td', {}, el('div', {}, ride.customerName), ride.phone ? el('div', { class: 'hint' }, ride.phone) : null),
           el('td', { class: 'ellipsis', title: ride.address }, ride.address || coords(ride.pickup)),
-          el('td', { class: 'nowrap' }, el('div', {}, ride.carPlate), el('div', { class: 'hint' }, ride.driverName)),
+          el('td', { class: 'nowrap' }, el('div', {}, ride.carPlate || '—'), el('div', { class: 'hint' }, ride.driverName)),
           el('td', {}, el('span', { class: 'badge', dataset: { status: ride.status } }, UI.RIDE_STATUS_LABELS[ride.status])),
           el('td', { class: 'num' }, UI.formatMinutes(waitMs(ride))),
           el('td', { class: 'num' }, UI.formatMinutes(durationMs(ride))),
@@ -288,17 +292,22 @@
         { class: 'lines' },
         ride.phone ? el('div', {}, 'Telefon: ', el('a', { href: 'tel:' + ride.phone }, ride.phone)) : null,
         el('div', {}, 'Preluare: ' + (ride.address || coords(ride.pickup))),
-        el('div', {}, 'Mașina: ' + ride.carPlate + ' · ' + ride.driverName),
+        el('div', {}, 'Mașina: ' + (ride.carPlate ? ride.carPlate + ' · ' + ride.driverName : 'niciun șofer nu a acceptat')),
         ride.createdByName ? el('div', {}, 'Dispecer: ' + ride.createdByName) : null,
         ride.closedByName ? el('div', {}, (ride.status === 'cancelled' ? 'Anulată de: ' : 'Încheiată de: ') + ride.closedByName) : null,
         ride.notes ? el('div', {}, 'Observații: ' + ride.notes) : null,
-        ride.status === 'completed' ? el('div', {}, 'Distanță cu clientul: ' + UI.formatKm(ride.distanceM)) : null
+        ride.status === 'completed' ? el('div', {}, 'Distanță cu clientul: ' + UI.formatKm(ride.distanceM)) : null,
+        ride.offers.length
+          ? el('div', {}, 'Trimisă la: ' + ride.offers.map((o) => o.plate + ' (' + (OFFER_LABELS[o.response] || 'fără răspuns') + ')').join(', '))
+          : null,
+        ride.sms && ride.sms.status ? el('div', {}, 'SMS către client: ' + (SMS_LABELS[ride.sms.status] || ride.sms.status) + (ride.sms.detail ? ' · ' + ride.sms.detail : '')) : null
       ),
       el(
         'ol',
         { class: 'timeline' },
-        step('comandă primită', t.assigned),
-        step('mașina a ajuns', t.arrived, t.assigned),
+        step('comandă primită', t.pending),
+        step('acceptată de șofer', t.assigned, t.pending),
+        step('mașina a ajuns', t.arrived, t.pending),
         step('client preluat', t.in_progress),
         step(ride.status === 'cancelled' ? 'anulată' : 'cursă finalizată', finishedAt, ride.status === 'completed' ? t.in_progress : null)
       ),

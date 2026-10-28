@@ -21,7 +21,12 @@ const CONFIG = {
   avgSpeedKmh: 25,
   trustProxy: false,
   routeRetentionDays: 180,
+  publicUrl: 'https://taxi.test',
+  offerTimeoutSeconds: 60,
+  sms: { provider: 'console', countryCode: '40' },
+  smsTransport: { log: (line) => smsLog.push(line) },
 };
+const smsLog = [];
 
 let server;
 let baseUrl;
@@ -175,77 +180,101 @@ test('cererile venite de pe alte site-uri sunt respinse', async () => {
   assert.equal(same.status, 200);
 });
 
-test('fluxul complet: șofer → dispecer → cursă → client', async () => {
+test('fluxul complet: comanda → șoferii o acceptă sau o refuză → SMS → linkul clientului', async () => {
   const dispatcher = dispatcherClient(mariaCookie);
   const snapshot = await waitFor(dispatcher, 'fleet:snapshot');
   assert.equal(snapshot.user.name, 'Maria Ionescu');
   assert.equal(snapshot.cars.length, 2);
   assert.ok(snapshot.cars.every((c) => c.status === 'offline' && !('pin' in c) && !('pinHash' in c)));
 
-  // Șoferul se conectează și apare liber în dispecerat.
-  const freeUpdate = waitFor(dispatcher, 'car:update', (c) => c.id === 'a' && c.status === 'free');
-  const driver = client({ role: 'driver', carId: 'a', pin: '1111' });
-  const init = await waitFor(driver, 'driver:init');
-  assert.equal(init.car.plate, 'B 01 AAA');
-  assert.equal(init.ride, null);
-  await freeUpdate;
-
-  // Poziția trimisă de telefon ajunge în timp real la dispecerat.
+  // Doi șoferi în tură; pozițiile lor ajung live în dispecerat.
+  const driverA = client({ role: 'driver', carId: 'a', pin: '1111' });
+  const driverB = client({ role: 'driver', carId: 'b', pin: '2222' });
+  const initA = await waitFor(driverA, 'driver:init');
+  await waitFor(driverB, 'driver:init');
+  assert.deepEqual(initA.offers, []);
   const moved = waitFor(dispatcher, 'car:update', (c) => c.id === 'a' && c.position);
-  driver.emit('location', { lat: 44.42, lng: 26.1, speed: 10 });
+  driverA.emit('location', { lat: 44.42, lng: 26.1, speed: 10 });
+  driverB.emit('location', { lat: 44.40, lng: 26.1 });
   assert.equal((await moved).position.lat, 44.42);
 
-  // Dispecerul trimite o cursă; șoferul o primește.
-  const rideForDriver = waitFor(driver, 'ride:update', (r) => r.status === 'assigned');
+  // 1. Clientul sună; dispecerul introduce comanda, care ajunge la toate mașinile libere.
+  const offerA = waitFor(driverA, 'offer:new');
+  const offerB = waitFor(driverB, 'offer:new');
   const created = await dispatcher.emitWithAck('ride:create', {
     customerName: 'Ana Pop',
-    phone: '0722000000',
+    phone: '0722 000 000',
     address: 'Calea Victoriei 1',
     pickup: { lat: 44.43, lng: 26.1 },
-    carId: 'a',
+    target: { mode: 'all' },
   });
   assert.equal(created.ok, true, created.error);
+  assert.equal(created.ride.status, 'pending');
   assert.equal(created.ride.createdByName, 'Maria Ionescu');
-  assert.match(created.ride.trackPath, /^\/track\/[\w-]{20,}$/);
-  const driverRide = await rideForDriver;
-  assert.equal(driverRide.customerName, 'Ana Pop');
-  assert.equal('trackPath' in driverRide, false);
+  assert.deepEqual(created.offeredTo.sort(), ['a', 'b']);
+  const [seenA, seenB] = await Promise.all([offerA, offerB]);
+  assert.equal(seenA.rideId, created.ride.id);
+  assert.equal(seenA.address, 'Calea Victoriei 1');
+  assert.ok(seenA.distanceM < seenB.distanceM); // a e mai aproape de client
+  assert.ok(!/Ana|0722/.test(JSON.stringify(seenA))); // datele clientului apar doar după acceptare
 
-  // A doua cursă pe aceeași mașină e refuzată.
-  const second = await dispatcher.emitWithAck('ride:create', { customerName: 'Altcineva', pickup: { lat: 44.43, lng: 26.1 }, carId: 'a' });
-  assert.equal(second.ok, false);
-
-  // Clientul deschide linkul și vede mașina apropiindu-se.
+  // Până acceptă cineva, linkul clientului nu funcționează și nu pleacă niciun SMS.
   const token = created.ride.trackPath.split('/').pop();
+  assert.equal(await connectError({ role: 'track', token }), 'not_found');
+
+  // 2. Șoferul B refuză; dispecerul vede refuzul.
+  const declined = waitFor(dispatcher, 'ride:update', (r) => r.id === created.ride.id && r.offers.some((o) => o.response === 'declined'));
+  assert.equal((await driverB.emitWithAck('offer:decline', { rideId: created.ride.id })).ok, true);
+  assert.equal((await declined).offers.find((o) => o.carId === 'b').response, 'declined');
+
+  // 3. Șoferul A acceptă: primește cursa, cu datele clientului.
+  const assigned = waitFor(dispatcher, 'ride:update', (r) => r.id === created.ride.id && r.status === 'assigned');
+  const smsDone = waitFor(dispatcher, 'ride:update', (r) => r.id === created.ride.id && r.sms.status === 'simulated');
+  const accepted = await driverA.emitWithAck('offer:accept', { rideId: created.ride.id });
+  assert.equal(accepted.ok, true, accepted.error);
+  assert.equal(accepted.ride.customerName, 'Ana Pop');
+  assert.equal(accepted.ride.phone, '0722 000 000');
+  assert.equal((await assigned).carPlate, 'B 01 AAA');
+
+  // 4. Clientul primește automat SMS cu linkul, mașina, șoferul și timpul estimat.
+  const smsRide = await smsDone;
+  assert.equal(smsRide.sms.detail, '+40722000000');
+  const smsText = smsLog.find((line) => line.includes(token));
+  assert.ok(smsText, smsLog.join('\n'));
+  assert.match(smsText, /^\[sms simulat\] către \+40722000000: Test Taxi: Taxiul B 01 AAA \(Logan, sofer Ion\) vine spre dvs\., ajunge in cca \d+ min\. Urmariti-l: https:\/\/taxi\.test\/track\//);
+
+  // 5. Linkul arată harta, mașina, șoferul și timpul estimat.
   const tracker = client({ role: 'track', token });
   const first = await waitFor(tracker, 'track:update');
   assert.equal(first.ride.status, 'assigned');
-  assert.equal(first.car.plate, 'B 01 AAA');
-  assert.ok(first.distanceM > 1000);
-  assert.ok(!/0722000000|Maria/.test(JSON.stringify(first)));
+  assert.deepEqual([first.car.plate, first.car.model, first.car.driverFirstName], ['B 01 AAA', 'Logan', 'Ion']);
+  assert.ok(first.distanceM > 1000 && first.etaMin >= 1);
+  assert.ok(!/0722|Ana Pop/.test(JSON.stringify(first)));
 
   await new Promise((r) => setTimeout(r, 550)); // peste limita de frecvență a actualizărilor
-  const closer = waitFor(tracker, 'track:update', (v) => v.car.position && v.car.position.lat === 44.428);
-  driver.emit('location', { lat: 44.428, lng: 26.1 });
+  const closer = waitFor(tracker, 'track:update', (v) => v.car && v.car.position && v.car.position.lat === 44.428);
+  driverA.emit('location', { lat: 44.428, lng: 26.1 });
   assert.ok((await closer).distanceM < first.distanceM);
 
-  // Șoferul termină cursa; clientul vede finalul, mașina redevine liberă.
-  assert.equal((await driver.emitWithAck('ride:status', { rideId: created.ride.id, status: 'cancelled' })).ok, false);
+  // 6. Cursa se încheie: linkul dispare (pagina deschisă e închisă, linkul nu mai funcționează).
+  assert.equal((await driverA.emitWithAck('ride:status', { rideId: created.ride.id, status: 'cancelled' })).ok, false);
   for (const status of ['arrived', 'in_progress']) {
     const seen = waitFor(tracker, 'track:update', (v) => v.ride.status === status);
-    assert.equal((await driver.emitWithAck('ride:status', { rideId: created.ride.id, status })).ok, true);
+    assert.equal((await driverA.emitWithAck('ride:status', { rideId: created.ride.id, status })).ok, true);
     await seen;
   }
   const done = waitFor(tracker, 'track:update', (v) => v.ride.status === 'completed');
+  const closed = waitFor(tracker, 'disconnect');
   const freed = waitFor(dispatcher, 'car:update', (c) => c.id === 'a' && c.status === 'free');
-  const closedForDispatcher = waitFor(dispatcher, 'ride:update', (r) => r.status === 'completed');
-  assert.equal((await driver.emitWithAck('ride:status', { rideId: created.ride.id, status: 'completed' })).ok, true);
-  assert.equal((await done).car.position, null);
+  assert.equal((await driverA.emitWithAck('ride:status', { rideId: created.ride.id, status: 'completed' })).ok, true);
+  assert.deepEqual(await done, { ride: { status: 'completed' }, car: null, distanceM: null, etaMin: null });
+  assert.equal(await closed, 'io server disconnect');
+  assert.equal(await connectError({ role: 'track', token }), 'not_found');
   assert.equal((await freed).rideId, null);
-  assert.equal((await closedForDispatcher).closedByName, 'Șofer');
 
   const offline = waitFor(dispatcher, 'car:update', (c) => c.id === 'a' && c.status === 'offline');
-  driver.disconnect();
+  driverA.disconnect();
+  driverB.disconnect();
   await offline;
 });
 
@@ -255,8 +284,15 @@ test('dispecerul poate anula o cursă, iar șoferul este anunțat', async () => 
   const driver = client({ role: 'driver', carId: 'b', pin: '2222' });
   await waitFor(driver, 'driver:init');
 
-  const created = await dispatcher.emitWithAck('ride:create', { customerName: 'Dan', pickup: { lat: 44.44, lng: 26.11 }, carId: 'b' });
+  // Comandă trimisă direct unei mașini (o alege dispecerul); fără telefon nu se trimite SMS.
+  const offered = waitFor(driver, 'offer:new');
+  const created = await dispatcher.emitWithAck('ride:create', { customerName: 'Dan', pickup: { lat: 44.44, lng: 26.11 }, target: { mode: 'car', carId: 'b' } });
   assert.equal(created.ok, true, created.error);
+  assert.deepEqual(created.offeredTo, ['b']);
+  await offered;
+  const noPhone = waitFor(dispatcher, 'ride:update', (r) => r.id === created.ride.id && r.sms.status === 'no_phone');
+  assert.equal((await driver.emitWithAck('offer:accept', { rideId: created.ride.id })).ok, true);
+  await noPhone;
 
   const cancelled = waitFor(driver, 'ride:update', (r) => r.status === 'cancelled');
   assert.equal((await dispatcher.emitWithAck('ride:status', { rideId: created.ride.id, status: 'cancelled' })).ok, true);
@@ -390,7 +426,7 @@ test('jurnalul arată cine ce a făcut', async () => {
   assert.ok(has('auth_password_change', 'Maria Ionescu'));
   assert.ok(has('auth_logout', 'Maria Ionescu'));
   assert.ok(has('user_create', 'Administrator', /^Maria Ionescu \(maria\), dispecer$/));
-  assert.ok(has('ride_create', 'Maria Ionescu', /^Cursa #1 · Ana Pop · B 01 AAA$/));
+  assert.ok(has('ride_create', 'Maria Ionescu', /^Cursa #1 · Ana Pop · trimisă la 2 mașini$/));
   assert.ok(has('ride_cancel', 'Maria Ionescu', /^Cursa #2 · Dan · B 02 BBB$/));
   assert.ok(has('car_create', 'Administrator', /^B 77 NEW · Radu Ene$/));
   assert.ok(has('car_update', 'Administrator', /^B 77 NEW: PIN nou$/));
@@ -443,22 +479,37 @@ test('aplicația șoferului: token, poziție prin HTTP și cursa în răspuns', 
   await online;
   assert.equal((await driverApi('/api/driver/location', { token, body: { lat: 999, lng: 0 } })).status, 400);
 
-  // Dispecerul trimite o cursă; aplicația o află din răspunsul următor (chiar fiind în fundal).
-  const created = await dispatcher.emitWithAck('ride:create', { customerName: 'Elena', phone: '0733', pickup: { lat: 44.42, lng: 26.1 }, carId: 'b' });
+  // Dispecerul trimite o comandă; aplicația o află din răspunsul următor (chiar fiind în fundal).
+  const created = await dispatcher.emitWithAck('ride:create', { customerName: 'Elena', phone: '0733', pickup: { lat: 44.42, lng: 26.1 }, target: { mode: 'car', carId: 'b' } });
   assert.equal(created.ok, true, created.error);
   await new Promise((r) => setTimeout(r, 550));
   const next = await driverApi('/api/driver/location', { token, body: { lat: 44.412, lng: 26.1 } });
-  assert.equal(next.body.ride.id, created.ride.id);
-  assert.equal(next.body.ride.status, 'assigned');
-  assert.equal(next.body.ride.customerName, 'Elena');
-  assert.equal('trackPath' in next.body.ride, false);
+  assert.equal(next.body.car.rideId, null);
+  assert.deepEqual(next.body.offers.map((o) => o.rideId), [created.ride.id]);
+  assert.equal(next.body.offers[0].address, '');
+  assert.ok(next.body.offers[0].expiresAt > Date.now());
+  assert.ok(!JSON.stringify(next.body.offers).includes('Elena'));
+
+  // Acceptarea prin HTTP (merge și când WebSocket-ul aplicației e întrerupt).
+  const accept = await driverApi(`/api/driver/offers/${created.ride.id}/accept`, { token });
+  assert.equal(accept.status, 200, JSON.stringify(accept.body));
+  assert.equal(accept.body.ride.id, created.ride.id);
+  assert.equal(accept.body.ride.status, 'assigned');
+  assert.equal(accept.body.ride.customerName, 'Elena');
+  assert.deepEqual(accept.body.offers, []);
+  assert.equal('trackPath' in accept.body.ride, false);
   assert.equal((await driverApi('/api/driver/state', { method: 'GET', token })).body.ride.id, created.ride.id);
+  assert.equal((await driverApi('/api/driver/offers/999/accept', { token })).status, 409);
 
   // Cu același token se conectează și WebSocket-ul (cursele live când aplicația e deschisă).
   const socket = client({ role: 'driver', token });
   const init = await waitFor(socket, 'driver:init');
   assert.equal(init.ride.id, created.ride.id);
   assert.equal((await socket.emitWithAck('ride:status', { rideId: created.ride.id, status: 'arrived' })).ok, true);
+  // Statusul cursei se poate trimite și prin HTTP.
+  const started = await driverApi(`/api/driver/rides/${created.ride.id}/status`, { token, body: { status: 'in_progress' } });
+  assert.equal(started.body.ride.status, 'in_progress');
+  assert.equal((await driverApi(`/api/driver/rides/${created.ride.id}/status`, { token, body: { status: 'cancelled' } })).status, 400);
   assert.equal(await connectError({ role: 'driver', token: 'fals' }), 'unauthorized');
   await dispatcher.emitWithAck('ride:status', { rideId: created.ride.id, status: 'cancelled' });
   // Din fundal (fără WebSocket), aplicația află anularea din răspunsul următor.
@@ -473,6 +524,33 @@ test('aplicația șoferului: token, poziție prin HTTP și cursa în răspuns', 
   socket.disconnect();
   await offline;
   assert.equal((await driverApi('/api/driver/location', { token, body: { lat: 44.41, lng: 26.1 } })).status, 401);
+});
+
+test('doi șoferi acceptă în același timp: doar primul primește cursa', async () => {
+  const dispatcher = dispatcherClient(mariaCookie);
+  await waitFor(dispatcher, 'fleet:snapshot');
+  const a = client({ role: 'driver', carId: 'a', pin: '1111' });
+  const b = client({ role: 'driver', carId: 'b', pin: '2222' });
+  await Promise.all([waitFor(a, 'driver:init'), waitFor(b, 'driver:init')]);
+  const offers = Promise.all([waitFor(a, 'offer:new'), waitFor(b, 'offer:new')]);
+  const created = await dispatcher.emitWithAck('ride:create', { customerName: 'Ioana', pickup: { lat: 44.43, lng: 26.1 }, target: { mode: 'all' } });
+  await offers;
+
+  const gone = Promise.race([waitFor(a, 'offer:gone'), waitFor(b, 'offer:gone')]);
+  const results = await Promise.all([a.emitWithAck('offer:accept', { rideId: created.ride.id }), b.emitWithAck('offer:accept', { rideId: created.ride.id })]);
+  assert.deepEqual(results.map((r) => r.ok).sort(), [false, true]);
+  assert.match(results.find((r) => !r.ok).error, /preluată de alt coleg/);
+  assert.deepEqual(await gone, { rideId: created.ride.id, reason: 'taken' });
+
+  // O comandă anulată înainte de acceptare dispare de pe telefoane.
+  const second = await dispatcher.emitWithAck('ride:create', { customerName: 'Radu', pickup: { lat: 44.43, lng: 26.1 }, target: { mode: 'all' } });
+  const winner = results[0].ok ? b : a; // mașina rămasă liberă
+  const withdrawn = waitFor(winner, 'offer:gone', (g) => g.rideId === second.ride.id);
+  await dispatcher.emitWithAck('ride:status', { rideId: second.ride.id, status: 'cancelled' });
+  assert.equal((await withdrawn).reason, 'withdrawn');
+  await dispatcher.emitWithAck('ride:status', { rideId: created.ride.id, status: 'cancelled' });
+  a.disconnect();
+  b.disconnect();
 });
 
 test('după prea multe încercări greșite, IP-ul este blocat temporar', async () => {

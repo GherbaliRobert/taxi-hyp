@@ -14,6 +14,8 @@
     ride_cancel: 'Cursă anulată',
     ride_complete: 'Cursă finalizată',
     ride_status: 'Status cursă schimbat',
+    ride_resend: 'Comandă retrimisă',
+    ride_sms: 'SMS retrimis clientului',
     car_create: 'Mașină adăugată',
     car_update: 'Mașină modificată',
     car_deactivate: 'Mașină dezactivată',

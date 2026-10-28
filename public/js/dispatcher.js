@@ -5,8 +5,11 @@
   const $ = (id) => document.getElementById(id);
 
   const STATUS_ORDER = { free: 0, busy: 1, offline: 2 };
-  const PICKUP_VISIBLE = new Set(['assigned', 'arrived']);
-  const ACTIVE_RIDE = new Set(['assigned', 'arrived', 'in_progress']);
+  const PICKUP_VISIBLE = new Set(['pending', 'assigned', 'arrived']);
+  const ACTIVE_RIDE = new Set(['pending', 'assigned', 'arrived', 'in_progress']);
+  const LINK_ACTIVE = new Set(['assigned', 'arrived', 'in_progress']);
+  // Răspunsurile șoferilor la o comandă.
+  const OFFER_LABELS = { accepted: 'a acceptat', declined: 'a refuzat', expired: 'nu a răspuns', taken: 'preluată de altul', withdrawn: 'retrasă' };
   const TRAIL_LENGTH = 30;
   const NOMINATIM = 'https://nominatim.openstreetmap.org';
 
@@ -56,6 +59,8 @@
 
     // Timpii „acum X s” și starea „fără semnal” se recalculează periodic.
     setInterval(refreshTimes, 5000);
+    // Secundele rămase pentru acceptarea comenzilor.
+    setInterval(updateCountdowns, 1000);
 
     UI.requireDispatcher(start, () => {
       mapVisible = true;
@@ -142,13 +147,13 @@
     if (car.active === false) {
       removeCar(car.id);
       renderCarList();
-      if (activeTab === 'new') refreshCarSelect();
+      if (activeTab === 'new') refreshTargetSelect();
       return;
     }
     const prev = upsertCar(car);
     if (!prev || prev.status !== car.status || prev.rideId !== car.rideId) {
       renderCarList();
-      if (activeTab === 'new') refreshCarSelect();
+      if (activeTab === 'new') refreshTargetSelect();
     } else {
       updateCarRow(cars.get(car.id));
     }
@@ -313,11 +318,29 @@
   function onRideUpdate(ride) {
     const prev = rides.get(ride.id);
     rides.set(ride.id, ride);
-    if (prev && prev.status !== ride.status) {
-      UI.toast('Cursa #' + ride.id + ' (' + ride.carPlate + '): ' + UI.RIDE_STATUS_LABELS[ride.status]);
-    }
+    if (prev) notifyChanges(prev, ride);
     renderRides();
     syncRideLayers();
+  }
+
+  /** Mesaje pentru dispecer: comandă acceptată, nimeni n-a acceptat, SMS netrimis. */
+  function notifyChanges(prev, ride) {
+    const name = '#' + ride.id + ' (' + ride.customerName + ')';
+    if (prev.status === 'pending' && ride.status === 'assigned') {
+      UI.toast('Comanda ' + name + ' a fost acceptată de ' + ride.carPlate + ' · ' + ride.driverName, 'success');
+    } else if (prev.status !== ride.status) {
+      UI.toast('Cursa ' + name + ': ' + UI.RIDE_STATUS_LABELS[ride.status]);
+    } else if (ride.status === 'pending' && openOffers(prev).length && !openOffers(ride).length) {
+      UI.toast('Comanda ' + name + ': niciun șofer nu a acceptat. Retrimiteți-o sau anulați-o.', 'error');
+    }
+    if (ride.sms.status === 'failed' && prev.sms.status !== 'failed') {
+      UI.toast('SMS-ul către client nu a plecat (' + ride.sms.detail + '). Trimiteți linkul manual.', 'error');
+    }
+  }
+
+  function openOffers(ride) {
+    const now = Date.now();
+    return (ride.offers || []).filter((o) => o.response === null && o.expiresAt > now);
   }
 
   function renderRides() {
@@ -345,19 +368,27 @@
     const active = ACTIVE_RIDE.has(ride.status);
     const link = location.origin + ride.trackPath;
     const actions = [];
-    if (active) {
+    const button = (label, onclick, style) => el('button', { class: 'btn btn-sm' + (style ? ' ' + style : ''), type: 'button', onclick }, label);
+    if (ride.status === 'pending') {
       actions.push(
-        el('button', { class: 'btn btn-sm', type: 'button', onclick: () => copyLink(link) }, 'Copiază link client'),
+        button('Retrimite la toate mașinile libere', () => resendRide(ride), 'btn-primary'),
+        button('Pe hartă', () => showRide(ride)),
+        button('Anulează', () => changeRideStatus(ride, 'cancelled'), 'btn-danger')
+      );
+    } else if (active) {
+      actions.push(
+        button('Copiază link client', () => copyLink(link)),
         el('a', { class: 'btn btn-sm', href: ride.trackPath, target: '_blank', rel: 'noopener' }, 'Deschide'),
-        el('button', { class: 'btn btn-sm', type: 'button', onclick: () => showRide(ride) }, 'Pe hartă'),
-        el('button', { class: 'btn btn-sm', type: 'button', onclick: () => changeRideStatus(ride, 'completed') }, 'Finalizează'),
-        el('button', { class: 'btn btn-sm btn-danger', type: 'button', onclick: () => changeRideStatus(ride, 'cancelled') }, 'Anulează')
+        button('Pe hartă', () => showRide(ride)),
+        button('Finalizează', () => changeRideStatus(ride, 'completed')),
+        button('Anulează', () => changeRideStatus(ride, 'cancelled'), 'btn-danger')
       );
     }
     const finishedAt = ride.statusTimes.completed || ride.statusTimes.cancelled;
+    const waiting = ride.status === 'pending' && !openOffers(ride).length;
     return el(
       'li',
-      { class: 'card ride-item' + (active ? '' : ' finished') },
+      { class: 'card ride-item' + (active ? '' : ' finished') + (waiting ? ' needs-attention' : '') },
       el(
         'div',
         { class: 'head' },
@@ -368,9 +399,11 @@
         'div',
         { class: 'lines' },
         el('div', {}, 'Preluare: ' + (ride.address || coords(ride.pickup))),
-        ride.phone && el('div', {}, 'Telefon: ', el('a', { href: 'tel:' + ride.phone }, ride.phone)),
-        el('div', {}, 'Mașina: ' + ride.carPlate),
-        ride.notes && el('div', {}, 'Observații: ' + ride.notes),
+        ride.phone ? el('div', {}, 'Telefon: ', el('a', { href: 'tel:' + ride.phone }, ride.phone)) : null,
+        ride.carPlate ? el('div', {}, 'Mașina: ' + ride.carPlate + ' · ' + ride.driverName) : null,
+        ride.notes ? el('div', {}, 'Observații: ' + ride.notes) : null,
+        ride.status === 'pending' ? offersLine(ride) : null,
+        LINK_ACTIVE.has(ride.status) ? smsLine(ride, link) : null,
         el(
           'div',
           {},
@@ -383,10 +416,83 @@
     );
   }
 
+  /** Cui a fost trimisă comanda și ce a răspuns fiecare șofer, plus timpul rămas. */
+  function offersLine(ride) {
+    const open = openOffers(ride);
+    if (!ride.offers.length) {
+      return el('div', { class: 'offer-state warn' }, 'Nicio mașină liberă când a fost trimisă. Retrimiteți-o când se eliberează o mașină.');
+    }
+    // Ultima trimitere (după o retrimitere, ofertele vechi apar „retrase”).
+    const lastRound = ride.offers.filter((o) => o.offeredAt === ride.offers[ride.offers.length - 1].offeredAt);
+    const expiresAt = Math.max(...lastRound.map((o) => o.expiresAt));
+    return el(
+      'div',
+      { class: 'offer-state' + (open.length ? '' : ' warn') },
+      open.length
+        ? el('div', {}, 'Se așteaptă acceptarea · ', el('span', { class: 'countdown', dataset: { expires: expiresAt } }, secondsLeft(expiresAt)))
+        : el('div', {}, 'Niciun șofer nu a acceptat comanda.'),
+      el(
+        'div',
+        { class: 'offer-cars' },
+        lastRound.map((o) =>
+          el('span', { class: 'offer-car', dataset: { response: o.response || 'open' } }, o.plate + (o.response ? ' — ' + OFFER_LABELS[o.response] : ''))
+        )
+      )
+    );
+  }
+
+  /** Starea SMS-ului cu linkul trimis clientului, cu variantele manuale când nu a plecat. */
+  function smsLine(ride, link) {
+    const { status, detail, at } = ride.sms;
+    const texts = {
+      sending: 'SMS: se trimite…',
+      sent: 'SMS trimis la ' + detail + (at ? ' · ' + UI.formatTime(at) : ''),
+      simulated: 'SMS simulat (nu e configurat un furnizor de SMS)',
+      failed: 'SMS netrimis: ' + detail,
+      no_phone: 'Fără telefon: clientul nu a primit SMS',
+      invalid_phone: 'Număr de telefon invalid: ' + detail,
+    };
+    const problem = status !== 'sent' && status !== 'sending';
+    const smsBody = 'Taxiul ' + ride.carPlate + ' de la ' + config.companyName + ' vine spre dvs. Urmariti-l: ' + link;
+    return el(
+      'div',
+      { class: 'sms-state' + (status === 'sent' ? ' ok' : problem ? ' warn' : '') },
+      texts[status] || 'SMS: în așteptare',
+      problem && ride.phone && status !== 'invalid_phone'
+        ? el('span', {}, ' · ', el('button', { class: 'link-button', type: 'button', onclick: () => resendSms(ride) }, 'retrimite'))
+        : null,
+      problem && ride.phone
+        ? el('span', {}, ' · ', el('a', { href: 'sms:' + ride.phone + '?body=' + encodeURIComponent(smsBody) }, 'SMS de pe telefonul dvs.'))
+        : null
+    );
+  }
+
+  function secondsLeft(expiresAt) {
+    return 'expiră în ' + Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000)) + ' s';
+  }
+
+  function updateCountdowns() {
+    document.querySelectorAll('.countdown[data-expires]').forEach((node) => (node.textContent = secondsLeft(Number(node.dataset.expires))));
+  }
+
+  function resendRide(ride) {
+    socket.emit('ride:resend', { rideId: ride.id, target: { mode: 'all' } }, (res) => {
+      if (!res || !res.ok) return UI.toast((res && res.error) || 'Eroare', 'error');
+      UI.toast(res.offeredTo.length ? 'Comanda a fost retrimisă la ' + res.offeredTo.length + ' mașini' : 'Nicio mașină liberă momentan', res.offeredTo.length ? 'success' : 'error');
+    });
+  }
+
+  function resendSms(ride) {
+    socket.emit('ride:sms', { rideId: ride.id }, (res) => {
+      if (!res || !res.ok) UI.toast((res && res.error) || 'Eroare', 'error');
+    });
+  }
+
   function changeRideStatus(ride, status) {
+    const what = ride.status === 'pending' ? 'comanda' : 'cursa';
     const question =
       status === 'cancelled'
-        ? 'Anulați cursa #' + ride.id + ' (' + ride.customerName + ')?'
+        ? 'Anulați ' + what + ' #' + ride.id + ' (' + ride.customerName + ')?'
         : 'Marcați cursa #' + ride.id + ' ca finalizată?';
     if (!confirm(question)) return;
     socket.emit('ride:status', { rideId: ride.id, status }, (res) => {
@@ -414,9 +520,14 @@
     for (const ride of rides.values()) {
       if (!PICKUP_VISIBLE.has(ride.status)) continue;
       let layers = rideLayers.get(ride.id);
+      if (layers && layers.pending !== (ride.status === 'pending')) {
+        layers.pin.setIcon(UI.pickupIcon(ride.status === 'pending' ? 'pending' : ''));
+        layers.pending = ride.status === 'pending';
+      }
       if (!layers) {
         layers = {
-          pin: L.marker([ride.pickup.lat, ride.pickup.lng], { icon: UI.pickupIcon() })
+          pending: ride.status === 'pending',
+          pin: L.marker([ride.pickup.lat, ride.pickup.lng], { icon: UI.pickupIcon(ride.status === 'pending' ? 'pending' : '') })
             .bindTooltip(el('span', {}, '#' + ride.id + ' ' + ride.customerName), { offset: [0, -30], direction: 'top' })
             .addTo(map),
           line: L.polyline([], { color: '#1c1f24', weight: 2, dashArray: '6 6', opacity: 0.7, interactive: false }).addTo(map),
@@ -441,7 +552,7 @@
     for (const panel of ['cars', 'rides', 'new']) $('panel-' + panel).hidden = panel !== name;
     document.body.classList.toggle('map-picking', name === 'new');
     if (name === 'new') {
-      refreshCarSelect();
+      refreshTargetSelect();
       if (pickup) showDraftMarker();
       if (!$('ride-result').hidden) return;
       $('ride-address').focus();
@@ -458,7 +569,7 @@
     showDraftMarker();
     $('pickup-status').classList.add('set');
     $('pickup-status').textContent = 'Loc de preluare ales: ' + coords(pickup) + ' (puteți trage de pin pentru ajustare)';
-    refreshCarSelect(true);
+    refreshTargetSelect();
     if (reverseGeocode && (!$('ride-address').value.trim() || addressWasAutoFilled)) {
       reverseAddress(lat, lng);
     }
@@ -476,34 +587,46 @@
     }
   }
 
-  /** Lista mașinilor libere, cea mai apropiată de client prima (și preselectată). */
-  function refreshCarSelect(selectNearest) {
-    const select = $('ride-car');
+  /**
+   * Cui se trimite comanda: toate mașinile libere (implicit), cele mai apropiate N, sau o singură mașină.
+   * Primul șofer care acceptă primește cursa.
+   */
+  function refreshTargetSelect() {
+    const select = $('ride-target');
     const previous = select.value;
     const free = [...cars.values()]
       .map((e) => e.data)
       .filter((c) => c.status === 'free')
-      .map((c) => ({
-        car: c,
-        distance: pickup && c.position ? Geo.distanceMeters(c.position, pickup) : Infinity,
-      }))
+      .map((c) => ({ car: c, distance: pickup && c.position ? Geo.distanceMeters(c.position, pickup) : Infinity }))
       .sort((a, b) => a.distance - b.distance || a.car.plate.localeCompare(b.car.plate));
 
-    if (!free.length) {
-      select.replaceChildren(el('option', { value: '' }, 'Nicio mașină liberă momentan'));
-      return;
+    const options = [
+      el('option', { value: 'all' }, free.length ? 'Toate mașinile libere (' + free.length + ')' : 'Nicio mașină liberă acum — comanda va aștepta'),
+    ];
+    for (const count of [3, 5]) {
+      if (free.length > count) options.push(el('option', { value: 'nearest:' + count }, 'Cele mai apropiate ' + count + ' mașini'));
     }
-    select.replaceChildren(
-      ...free.map(({ car, distance }) => {
-        const where = Number.isFinite(distance)
-          ? Geo.formatDistance(distance) + ' până la client'
-          : car.position
-            ? null
-            : 'fără poziție';
-        return el('option', { value: car.id }, car.plate + ' · ' + car.driver + (where ? ' — ' + where : ''));
-      })
-    );
-    if (!selectNearest && free.some((f) => f.car.id === previous)) select.value = previous;
+    if (free.length) {
+      options.push(
+        el(
+          'optgroup',
+          { label: 'O singură mașină' },
+          free.map(({ car, distance }) => {
+            const where = Number.isFinite(distance) ? Geo.formatDistance(distance) + ' până la client' : car.position ? null : 'fără poziție';
+            return el('option', { value: 'car:' + car.id }, car.plate + ' · ' + car.driver + (where ? ' — ' + where : ''));
+          })
+        )
+      );
+    }
+    select.replaceChildren(...options);
+    if ([...select.options].some((o) => o.value === previous)) select.value = previous;
+  }
+
+  function selectedTarget() {
+    const [mode, value] = $('ride-target').value.split(':');
+    if (mode === 'nearest') return { mode, count: Number(value) };
+    if (mode === 'car') return { mode, carId: value };
+    return { mode: 'all' };
   }
 
   function submitRide(e) {
@@ -520,7 +643,7 @@
       address: $('ride-address').value,
       notes: $('ride-notes').value,
       pickup,
-      carId: $('ride-car').value,
+      target: selectedTarget(),
     };
     const button = e.submitter || $('ride-form').querySelector('button[type=submit]');
     button.disabled = true;
@@ -537,7 +660,7 @@
       rides.set(res.ride.id, res.ride);
       renderRides();
       syncRideLayers();
-      showRideResult(res.ride);
+      showRideResult(res.ride, res.offeredTo);
       resetForm();
     });
   }
@@ -554,25 +677,25 @@
     $('pickup-status').textContent = 'Căutați adresa sau faceți click pe hartă pentru a alege locul de preluare.';
   }
 
-  function showRideResult(ride) {
-    const link = location.origin + ride.trackPath;
-    const sms =
-      'Taxiul ' + ride.carPlate + ' de la ' + config.companyName + ' este pe drum. Urmăriți-l aici: ' + link;
+  function showRideResult(ride, offeredTo) {
     const box = $('ride-result');
+    const count = offeredTo.length;
     box.replaceChildren(
       el(
         'div',
-        { class: 'result-box' },
-        el('strong', {}, 'Cursa #' + ride.id + ' a fost trimisă către ' + ride.carPlate + '.'),
-        el('div', { class: 'hint' }, 'Trimiteți clientului linkul de mai jos ca să vadă mașina venind spre el:'),
-        el('div', { class: 'link' }, link),
+        { class: 'result-box' + (count ? '' : ' warn') },
+        el('strong', {}, 'Comanda #' + ride.id + (count ? ' a fost trimisă la ' + count + (count === 1 ? ' mașină.' : ' mașini.') : ' așteaptă: nicio mașină liberă.')),
+        el(
+          'p',
+          { class: 'hint' },
+          count
+            ? 'Primul șofer care acceptă primește cursa. Clientul primește apoi automat SMS cu linkul de urmărire. Starea comenzii se vede în tabul Curse.'
+            : 'Comanda apare în tabul Curse; retrimiteți-o când se eliberează o mașină.'
+        ),
         el(
           'div',
           { class: 'actions row', style: 'flex-wrap:wrap' },
-          el('button', { class: 'btn btn-sm btn-primary', type: 'button', onclick: () => copyLink(link) }, 'Copiază link'),
-          ride.phone &&
-            el('a', { class: 'btn btn-sm', href: 'sms:' + ride.phone + '?body=' + encodeURIComponent(sms) }, 'Trimite SMS'),
-          el('a', { class: 'btn btn-sm', href: ride.trackPath, target: '_blank', rel: 'noopener' }, 'Deschide'),
+          el('button', { class: 'btn btn-sm btn-primary', type: 'button', onclick: () => setTab('rides') }, 'Vezi în Curse'),
           el(
             'button',
             {
@@ -584,7 +707,7 @@
                 $('ride-address').focus();
               },
             },
-            'Altă cursă'
+            'Comandă nouă'
           )
         )
       )

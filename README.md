@@ -1,18 +1,34 @@
 # Taxi Hyp — urmărirea taxiurilor în timp real
 
-Aplicație web pentru o firmă de taxi. Arată pe hartă, în timp real, unde se află fiecare mașină și îi permite clientului să vadă taxiul venind spre el. Păstrează istoricul curselor, cu traseul parcurs, permite administrarea flotei și a conturilor, iar un jurnal arată cine ce a făcut.
+Aplicație web pentru o firmă de taxi. Arată pe hartă, în timp real, unde se află fiecare mașină. Dispecerul trimite comenzile la șoferi, iar clientul primește prin SMS un link în care vede taxiul venind spre el. Păstrează istoricul curselor, cu traseul parcurs, permite administrarea flotei și a conturilor, iar un jurnal arată cine ce a făcut.
 
 | Pagina | Adresa | Pentru cine | Ce face |
 | --- | --- | --- | --- |
-| **Hartă** | `/` | dispeceri | Toate mașinile pe hartă, actualizate live (liber / ocupat / deconectat, direcție, viteză, traseu recent). Creează curse: adresa (căutare sau click pe hartă), clientul, mașina liberă cea mai apropiată. Generează linkul de urmărire pentru client. |
-| **Istoric** | `/history` | dispeceri | Cursele pe orice perioadă, cu filtre (mașină, status, client / telefon / adresă). Statistici: număr de curse, anulări, km cu clienți, timpul mediu de așteptare și durata medie. Totaluri pe mașină și șofer, respectiv pe dispecer. Traseul GPS al fiecărei curse pe hartă. Export pentru Excel. |
+| **Hartă** | `/` | dispeceri | Toate mașinile pe hartă, actualizate live (liber / ocupat / deconectat, direcție, viteză, traseu recent). Preia comenzile: adresa (căutare sau click pe hartă), clientul, telefonul; comanda pleacă la toți șoferii liberi, la cei mai apropiați sau la o anumită mașină. Arată cine a acceptat sau a refuzat și dacă SMS-ul a ajuns la client. |
+| **Istoric** | `/history` | dispeceri | Cursele pe orice perioadă, cu filtre (mașină, status, client / telefon / adresă). Statistici: număr de curse, anulări, comenzi fără șofer, km cu clienți, timpul mediu până la acceptare, de așteptare și durata medie. Totaluri pe mașină și șofer, respectiv pe dispecer. Traseul GPS al fiecărei curse pe hartă. Export pentru Excel. |
 | **Flotă** | `/fleet` | administratori | Adaugă și modifică mașini și șoferi, schimbă PIN-uri, dezactivează mașini. |
 | **Utilizatori** | `/users` | administratori | Conturile dispecerilor și administratorilor: adăugare, rol, resetare parolă, dezactivare. |
-| **Jurnal** | `/audit` | administratori | Cine ce a făcut și când: autentificări (inclusiv cele eșuate), curse create și anulate, modificări în flotă și conturi, exporturi. |
-| **Șofer** | `/driver` sau **aplicația Android** | șofer, pe telefon (mașină + PIN) | Trimite poziția GPS a telefonului, comută Liber / Ocupat, primește cursa cu sunet și vibrație, navigare cu Google Maps / Waze, butoane „Am ajuns”, „Client preluat”, „Cursă finalizată”. Aplicația Android transmite poziția **și cu ecranul stins** și anunță cursele noi prin notificări. |
-| **Client** | `/track/<cod>` | clientul (link primit prin SMS) | Vede mașina apropiindu-se pe hartă, distanța și timpul estimat, numărul de înmatriculare, modelul și prenumele șoferului. |
+| **Jurnal** | `/audit` | administratori | Cine ce a făcut și când: autentificări (inclusiv cele eșuate), comenzi trimise, retrimise și anulate, SMS-uri retrimise, modificări în flotă și conturi, exporturi. |
+| **Șofer** | `/driver` sau **aplicația Android** | șofer, pe telefon (mașină + PIN) | Trimite poziția GPS a telefonului, comută Liber / Ocupat, primește comenzile cu sunet și vibrație și le acceptă sau le refuză, navigare cu Google Maps / Waze, butoane „Am ajuns”, „Client preluat”, „Cursă finalizată”. Aplicația Android transmite poziția **și cu ecranul stins** și anunță comenzile noi prin notificări. |
+| **Client** | `/track/<cod>` | clientul (link primit automat prin SMS) | Vede mașina apropiindu-se pe hartă, distanța și timpul estimat, numărul de înmatriculare, modelul și prenumele șoferului. După încheierea cursei, linkul nu mai funcționează. |
 
 Poziția trimisă de telefonul șoferului ajunge în mai puțin de o secundă la dispecerat și la client (WebSocket).
+
+## Fluxul unei comenzi
+
+1. **Clientul sună la dispecerat** și spune adresa.
+2. **Dispecerul introduce comanda** (tabul **+ Cursă nouă**): caută adresa sau dă click pe hartă, completează numele și telefonul clientului și alege cui o trimite: tuturor mașinilor libere, celor mai apropiate 3 / 5 sau unei anumite mașini.
+3. **Șoferii primesc comanda** pe telefon, cu sunet, vibrație și (în aplicația Android) notificare. Văd adresa, observațiile, distanța și timpul până la client, dar **nu și numele sau telefonul clientului**. Au 60 de secunde să răspundă.
+4. **Șoferul acceptă sau refuză.** Primul care acceptă primește cursa: mașina lui devine ocupată, iar la ceilalți comanda dispare („preluată de alt coleg”). Abia acum șoferul vede numele și telefonul clientului.
+   - Dacă toți refuză sau nu răspunde nimeni, dispecerul vede un avertisment și poate **retrimite** comanda (eventual altor mașini) sau o poate **anula**.
+5. **Clientul primește automat un SMS** cu linkul de urmărire, de exemplu:
+   > Taxi Hyp: Taxiul B 105 TXI (Hyundai Ioniq, sofer Mihai) vine spre dvs., ajunge in cca 3 min. Urmariti-l: https://taxi.firma-mea.ro/track/…
+
+   În link, clientul vede pe hartă unde e taxiul, timpul estimat până la sosire, numărul de înmatriculare, modelul și prenumele șoferului. Dispecerul vede dacă SMS-ul a plecat și îl poate retrimite.
+6. **Șoferul marchează etapele**: „Am ajuns”, „Client preluat”, „Cursă finalizată”.
+7. **După finalizare (sau anulare), linkul dispare**: pagina deschisă la client arată „Cursa s-a încheiat”, iar la redeschidere linkul arată doar „Linkul nu mai este valabil”.
+
+Trimiterea SMS-urilor reale se configurează în secțiunea [SMS către clienți](#sms-către-clienți). Fără configurare, SMS-ul doar apare în jurnalul serverului (`[sms simulat] către +40…`).
 
 ## Pornire rapidă
 
@@ -36,7 +52,7 @@ Ca să vedeți mașini în mișcare fără telefoane reale, porniți simulatorul
 npm run simulate
 ```
 
-Mașinile demo circulă prin București pe străzi reale. Creați o cursă din tabul **+ Cursă nouă**, apoi deschideți linkul clientului. Mașina aleasă merge la client, îl preia și îl duce la destinație. Opțiuni: `-- --speed 3` (demo accelerat), `-- --cars 3` (doar 3 mașini), `-- --straight` (fără rutare pe străzi). Simulatorul folosește PIN-urile din `data/cars.json`.
+Mașinile demo circulă prin București pe străzi reale. Trimiteți o comandă din tabul **+ Cursă nouă**: șoferii simulați o acceptă (uneori o refuză sau o ignoră), iar textul SMS-ului cu linkul clientului apare în terminalul serverului. Mașina care a acceptat merge la client, îl preia și îl duce la destinație. Opțiuni: `-- --speed 3` (demo accelerat), `-- --cars 3` (doar 3 mașini), `-- --straight` (fără rutare pe străzi). Simulatorul folosește PIN-urile din `data/cars.json`.
 
 Pagina șoferului se poate testa pe același calculator la <http://localhost:3000/driver> (ex. mașina `B 101 TXI`, PIN `1111`). Browserul va cere permisiunea pentru locație.
 
@@ -45,7 +61,7 @@ Pagina șoferului se poate testa pe același calculator la <http://localhost:300
 Pagina `/driver` funcționează în orice browser, dar browserul oprește GPS-ul când ecranul se stinge sau șoferul deschide altă aplicație (ex. Waze). Aplicația Android din [`mobile/`](mobile) rezolvă asta:
 
 - **Transmite poziția și cu ecranul stins** sau din alte aplicații. Cât timp tura e activă, în bara de notificări apare „Tură activă · B 101 TXI”, așa cum cere Android pentru localizarea în fundal.
-- **Anunță cursele noi** (și anulările) printr-o notificare cu sunet, chiar dacă telefonul e în buzunar. Cu aplicația deschisă, cursa apare direct pe ecran.
+- **Anunță comenzile noi** (și anulările) printr-o notificare cu sunet, chiar dacă telefonul e în buzunar. Cu aplicația deschisă, comanda apare direct pe ecran, cu butoanele **Accept** și **Refuz**.
 - **Are aceeași interfață** ca pagina web: aplicația conține pagina șoferului, deci orice îmbunătățire a ei ajunge în ambele.
 - **Păstrează doar un token de sesiune**, nu PIN-ul. Un PIN nou sau dezactivarea mașinii închide tura pe telefon.
 
@@ -90,13 +106,13 @@ keytool -genkeypair -v -keystore taxi-release.jks -alias taxi -keyalg RSA -keysi
 
 ### Cum funcționează în fundal
 
-Android încetinește conexiunile paginii (WebView) după câteva minute în fundal. De aceea aplicația trimite poziția prin **HTTP nativ** (`POST /api/driver/location`), la 2 secunde în mers și cel puțin la 10 secunde pe loc. Răspunsul conține cursa curentă, astfel că o cursă nouă sau o anulare ajunge la șofer în cel mult ~10 secunde, chiar dacă WebSocket-ul e întrerupt. Pe server, mașina apare conectată cât timp a trimis ceva în ultimul minut.
+Android încetinește conexiunile paginii (WebView) după câteva minute în fundal. De aceea aplicația trimite poziția prin **HTTP nativ** (`POST /api/driver/location`), la 2 secunde în mers și cel puțin la 10 secunde pe loc. Răspunsul conține comenzile primite și cursa curentă, astfel că o comandă nouă sau o anulare ajunge la șofer în cel mult ~10 secunde, chiar dacă WebSocket-ul e întrerupt. Acceptarea și refuzul se trimit tot prin HTTP. Pe server, mașina apare conectată cât timp a trimis ceva în ultimul minut.
 
 ## Conturi, roluri și jurnal
 
 Fiecare persoană din dispecerat are contul ei (utilizator + parolă), cu unul dintre roluri:
 
-- **Dispecer**: hartă, curse (creare, anulare, finalizare), istoric și export.
+- **Dispecer**: hartă, comenzi (trimitere, retrimitere, anulare, finalizare, retrimiterea SMS-ului), istoric și export.
 - **Administrator**: în plus Flotă, Utilizatori și Jurnal.
 
 Din pagina **Utilizatori**, administratorul:
@@ -112,12 +128,12 @@ Fiecare își poate schimba parola din meniul cu numele său (dreapta sus). Atun
 **Jurnalul** (`/audit`) păstrează data, persoana, acțiunea, detaliile și adresa IP pentru:
 
 - autentificări (inclusiv cele eșuate), ieșiri și schimbări de parolă;
-- curse create, anulate sau finalizate de dispecer;
+- comenzi trimise (și la câte mașini), retrimise, anulate sau finalizate de dispecer, SMS-uri retrimise;
 - mașini adăugate, modificate (inclusiv „PIN nou”, fără PIN-ul în sine), dezactivate;
 - conturi create, modificate, resetate, dezactivate;
 - exporturi ale istoricului (fișierul conține telefoanele clienților).
 
-În istoric, fiecare cursă arată și dispecerul care a creat-o și cine a închis-o (șoferul sau dispecerul).
+În istoric, fiecare cursă arată și dispecerul care a creat-o, cui i-a fost trimisă comanda și ce a răspuns fiecare șofer, starea SMS-ului și cine a închis cursa (șoferul sau dispecerul).
 
 ## Flota și șoferii
 
@@ -147,18 +163,52 @@ Setările sunt variabile de mediu:
 | `MAP_CENTER_LAT`, `MAP_CENTER_LNG`, `MAP_ZOOM` | București, 13 | Centrul inițial al hărții (folosit și de simulator). |
 | `GEOCODE_COUNTRY` | `ro` | Țara în care se caută adresele (gol = oriunde). |
 | `AVG_SPEED_KMH` | `25` | Viteza medie în oraș pentru timpul estimat de sosire. |
+| `PUBLIC_URL` | adresa din browserul dispecerului | Adresa publică a serverului, folosită în linkul din SMS (ex. `https://taxi.firma-mea.ro`). **Setați-o** dacă dispecerii lucrează pe o adresă internă (ex. `http://192.168.1.10:3000`), pe care clienții nu o pot deschide. |
+| `OFFER_TIMEOUT_SECONDS` | `60` | Cât timp are șoferul să accepte comanda. |
+| `SMS_PROVIDER` | `console` | Cum se trimite SMS-ul clientului: `console` (doar în jurnalul serverului), `smsgate` sau `twilio`. Vezi mai jos. |
+| `SMS_COUNTRY_CODE` | `40` | Prefixul țării adăugat numerelor scrise local (`0722…` → `+40722…`). |
 | `TRUST_PROXY` | — | `1` dacă aplicația rulează în spatele unui reverse proxy (nginx, Caddy). |
+
+## SMS către clienți
+
+Când un șofer acceptă comanda, serverul trimite clientului SMS-ul cu linkul. Textul e scris fără diacritice, ca să încapă într-un singur SMS (160 de caractere). Dacă trimiterea eșuează (număr greșit, furnizor indisponibil), dispecerul vede eroarea lângă cursă și poate retrimite SMS-ul sau poate dicta clientului linkul (butonul îl copiază).
+
+Alegeți un furnizor:
+
+**1. Un telefon Android al firmei (`SMS_PROVIDER=smsgate`)** — cel mai ieftin: SMS-urile pleacă de pe cartela SIM a telefonului, la tariful abonamentului.
+
+1. Instalați pe un telefon Android cu cartelă SIM aplicația [SMS Gateway for Android](https://sms-gate.app) și porniți **Cloud server**. Aplicația afișează un utilizator și o parolă.
+2. Porniți serverul cu:
+
+   ```bash
+   SMS_PROVIDER=smsgate SMSGATE_USER=utilizator SMSGATE_PASSWORD=parola PUBLIC_URL=https://taxi.firma-mea.ro npm start
+   ```
+
+3. Lăsați telefonul pornit, încărcat și cu internet. Dezactivați „optimizarea bateriei” pentru aplicație.
+
+Cu serverul propriu SMS Gateway (sau modul „Local server” al aplicației), setați și `SMSGATE_URL` (implicit `https://api.sms-gate.app/3rdparty/v1`).
+
+**2. Twilio (`SMS_PROVIDER=twilio`)** — serviciu comercial, fără telefon, plătit per SMS.
+
+| Variabilă | Descriere |
+| --- | --- |
+| `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` | Din consola Twilio. |
+| `TWILIO_FROM` | Numărul sau numele expeditorului (ex. `TaxiHyp`, unde operatorii îl permit). |
+| `TWILIO_MESSAGING_SERVICE_SID` | Alternativă la `TWILIO_FROM`: un Messaging Service din Twilio. |
+
+Dacă lipsesc datele necesare furnizorului ales, serverul nu pornește și spune ce variabilă lipsește.
 
 ## Date și copii de siguranță
 
 Toate datele sunt într-un singur fișier, `data/taxi.db` (SQLite; nu e nevoie de un server de baze de date separat):
 
 - **Flota**: mașini, șoferi, PIN-uri (criptate), ultima poziție cunoscută.
-- **Cursele**: client, adresă, mașină, șofer, dispecer, ora fiecărei etape și km parcurși cu clientul.
+- **Cursele**: client, adresă, mașină, șofer, dispecer, ora fiecărei etape (inclusiv acceptarea), km parcurși cu clientul, starea SMS-ului.
+- **Comenzile trimise șoferilor**: cui, când și ce a răspuns fiecare (acceptat, refuzat, expirat, preluată de altul).
 - **Traseele**: câte un punct GPS la 10 secunde pe durata fiecărei curse.
 - **Conturile, sesiunile și jurnalul**: parolele și tokenurile de sesiune sunt păstrate doar ca hash.
 
-La repornirea serverului nu se pierde nimic: cursele în desfășurare continuă, linkurile clienților rămân valabile, iar dispecerii rămân autentificați. Telefoanele șoferilor se reconectează singure.
+La repornirea serverului nu se pierde nimic: comenzile care așteaptă un șofer și cursele în desfășurare continuă, linkurile clienților rămân valabile, iar dispecerii rămân autentificați. Telefoanele șoferilor se reconectează singure.
 
 O copie de siguranță se face cu serverul pornit:
 
@@ -215,9 +265,10 @@ npx cloudflared tunnel --url http://localhost:3000
   - Parolele dispecerilor și PIN-urile șoferilor se păstrează doar ca hash scrypt.
   - Sesiunea dispecerului este un cookie `HttpOnly` și `SameSite=Strict`, pe care JavaScript-ul paginii nu îl poate citi. Cererile care modifică date și conexiunile live sunt acceptate doar din paginile aplicației.
   - Încercările greșite repetate (parole, PIN-uri) sunt blocate temporar.
-  - Linkul clientului conține un cod aleatoriu de 128 de biți și arată doar mașina cursei respective, fără datele altor clienți. Linkul expiră la o zi după încheierea cursei, iar poziția mașinii nu mai este arătată după încheiere.
+  - Linkul clientului conține un cod aleatoriu de 128 de biți și arată doar mașina cursei respective, fără datele altor clienți. Linkul funcționează doar de la acceptarea comenzii până la încheierea cursei.
+  - Șoferii văd numele și telefonul clientului doar după ce acceptă comanda.
 - **Kilometrajul** se calculează doar cu clientul în mașină. Pozițiile GPS imprecise și salturile imposibile sunt ignorate.
-- **Statusurile cursei**: `Mașină în drum` → `Mașina a sosit` → `În cursă` → `Finalizată` (sau `Anulată` de dispecerat).
+- **Statusurile cursei**: `Se caută șofer` → `Mașină în drum` (acceptată, SMS trimis) → `Mașina a sosit` → `În cursă` → `Finalizată` (sau `Anulată` de dispecerat).
 
 ## Teste
 
@@ -228,9 +279,11 @@ npm test
 Testele verifică:
 
 - logica flotei și a curselor, baza de date (inclusiv repornirea serverului în timpul unei curse), istoricul și statisticile;
+- comenzile: trimiterea la mașinile libere / cele mai apropiate, primul care acceptă câștigă, refuzul, expirarea, retrimiterea, anularea, linkul valabil doar cât durează cursa;
+- SMS-ul: formatul numerelor, textul de maxim 160 de caractere, cererile către SMSGate și Twilio, erorile furnizorului;
 - conturile: autentificare, expirarea sesiunilor, parole temporare, roluri, protecția ultimului administrator;
-- un flux complet prin WebSocket și API: drepturi pe roluri, cereri respinse de pe alte site-uri, deconectarea la dezactivare și la ieșire, conținutul jurnalului;
-- API-ul aplicației șoferului: sesiuni cu token, poziția prin HTTP, cursa (și anularea ei) în răspuns, mașina „conectată” fără WebSocket.
+- un flux complet prin WebSocket și API (comandă → acceptare → SMS → link → finalizare), inclusiv doi șoferi care acceptă simultan: drepturi pe roluri, cereri respinse de pe alte site-uri, deconectarea la dezactivare și la ieșire, conținutul jurnalului;
+- API-ul aplicației șoferului: sesiuni cu token, poziția prin HTTP, comenzile și cursa (și anularea ei) în răspuns, acceptarea prin HTTP, mașina „conectată” fără WebSocket.
 
 GitHub Actions rulează testele și construiește APK-ul la fiecare modificare ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
@@ -239,7 +292,8 @@ GitHub Actions rulează testele și construiește APK-ul la fiecare modificare (
 - **Autentificare în doi pași (2FA)** pentru administratori nu există încă.
 - **Un singur server.** SQLite e potrivit pentru o firmă cu zeci de mașini pe un server. Pentru mai multe servere în paralel ar fi nevoie de PostgreSQL și de un adaptor Socket.IO (ex. Redis).
 - **iPhone:** aplicația există doar pentru Android. Pentru iOS e nevoie de un Mac cu Xcode și de un cont Apple Developer: `npx cap add ios` în `mobile/`, plus cheile de localizare în fundal din `Info.plist` (vezi documentația pluginului `@capacitor-community/background-geolocation`). Până atunci, pe iPhone se folosește pagina `/driver`.
-- **Fără notificări push:** cursele noi ajung în aplicație odată cu trimiterea poziției, deci doar cât timp tura e activă. Pentru anunțuri și cu tura oprită ar fi nevoie de Firebase Cloud Messaging.
+- **Fără notificări push:** comenzile noi ajung în aplicație odată cu trimiterea poziției, deci doar cât timp tura e activă. Pentru anunțuri și cu tura oprită ar fi nevoie de Firebase Cloud Messaging.
 - **Hărțile OpenStreetMap în aplicație:** serverele gratuite de hărți pot limita cererile venite din aplicații. Harta e secundară pentru șofer (navigarea se face cu Google Maps / Waze); la nevoie folosiți un furnizor de hărți propriu.
-- **Timpul estimat** se calculează din distanța în linie dreaptă, cu un factor pentru străzi. Pentru precizie mai mare se poate folosi un serviciu de rutare (OSRM, Google, Mapbox).
+- **Starea de livrare a SMS-ului:** „trimis” înseamnă că furnizorul a preluat mesajul. Confirmarea de livrare la telefonul clientului (prin webhook) nu este încă urmărită.
+- **Timpul estimat** (în SMS, la șofer și în linkul clientului) se calculează din distanța în linie dreaptă, cu un factor pentru străzi. Pentru precizie mai mare se poate folosi un serviciu de rutare (OSRM, Google, Mapbox).
 - **Serviciile OpenStreetMap gratuite** (hărți, Nominatim, rutarea din simulator) au limite de utilizare echitabilă. La trafic mare folosiți un furnizor comercial sau propriul server de hărți.

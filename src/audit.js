@@ -33,7 +33,8 @@ function userLabel(user) {
 }
 
 function rideSummary(ride) {
-  return `Cursa #${ride.id} · ${ride.customerName} · ${ride.carPlate}`;
+  // O comandă încă neacceptată nu are mașină.
+  return [`Cursa #${ride.id}`, ride.customerName, ride.carPlate].filter(Boolean).join(' · ');
 }
 
 function createAuditLog(repo, now = Date.now) {

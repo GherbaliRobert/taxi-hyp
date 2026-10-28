@@ -24,8 +24,15 @@ function setup() {
   return { store, clock, repo, restart };
 }
 
-function newRide(store, overrides) {
-  return store.createRide({ customerName: 'Ana', phone: '0722', address: 'Str. X 1', pickup: PICKUP, carId: 'a', ...overrides });
+/** Comandă trimisă unei mașini și acceptată de șoferul ei (dispecer → șofer). */
+function newRide(store, overrides = {}, actor) {
+  const { carId = 'a', ...fields } = overrides;
+  const order = store.createOrder(
+    { customerName: 'Ana', phone: '0722', address: 'Str. X 1', pickup: PICKUP, target: { mode: 'car', carId }, ...fields },
+    actor
+  );
+  if (!order.ok) return order;
+  return store.acceptOffer(order.ride.id, carId);
 }
 
 /** Trimite poziții la câte o secundă, deplasându-se spre nord cu `stepDeg` grade. */
@@ -201,7 +208,7 @@ test('validarea datelor cursei', () => {
   assert.equal(newRide(store, { pickup: { lat: 91, lng: 0 } }).ok, false);
   assert.equal(newRide(store, { pickup: null }).ok, false);
   assert.equal(newRide(store, { carId: 'nu-exista' }).ok, false);
-  assert.equal(store.createRide(null).ok, false);
+  assert.equal(store.createOrder(null).ok, false);
   assert.equal(newRide(store, { customerName: 'x'.repeat(500) }).ride.customerName.length, 80);
 });
 
@@ -223,7 +230,7 @@ test('șoferul conduce cursa până la final, iar mașina redevine liberă', () 
   assert.match(store.updateRideStatus('999', 'cancelled', DISPATCHER).error, /inexistentă/);
 
   const stored = store.getRide(ride.id);
-  assert.deepEqual(Object.keys(stored.statusTimes), ['assigned', 'arrived', 'in_progress', 'completed']);
+  assert.deepEqual(Object.keys(stored.statusTimes), ['pending', 'assigned', 'arrived', 'in_progress', 'completed']);
   assert.equal(stored.status, 'completed');
   const car = store.getCarView('a');
   assert.equal(car.status, 'free');
@@ -291,15 +298,12 @@ test('pagina clientului primește distanța și timpul estimat, fără date desp
   assert.equal(store.trackingView(ride).etaMin, null);
 
   store.updateRideStatus(ride.id, 'completed', DISPATCHER);
-  clock.advance(1000);
-  store.updateLocation('a', { lat: 44.5, lng: 26.2 });
-  // După încheierea cursei clientul nu mai vede unde e mașina.
-  const finished = store.getRideByToken(ride.token);
-  assert.equal(finished.status, 'completed');
-  assert.equal(store.trackingView(finished).car.position, null);
+  // După încheierea cursei linkul dispare și nu mai arată nimic despre mașină sau șofer.
+  assert.equal(store.getRideByToken(ride.token), null);
+  assert.deepEqual(store.trackingView(store.getRide(ride.id)), { ride: { status: 'completed' }, car: null, distanceM: null, etaMin: null });
 });
 
-test('linkul clientului expiră la o zi după încheierea cursei, dar cursa rămâne în istoric', () => {
+test('cursele încheiate rămân o zi în lista dispecerului și oricât în istoric', () => {
   const { store, clock } = setup();
   store.driverConnected('a');
   const { ride } = newRide(store);
@@ -307,7 +311,6 @@ test('linkul clientului expiră la o zi după încheierea cursei, dar cursa răm
   assert.equal(store.listRides().length, 1);
 
   clock.advance(25 * 60 * 60 * 1000);
-  assert.equal(store.getRideByToken(ride.token), null);
   assert.equal(store.listRides().length, 0);
   assert.equal(store.getRide(ride.id).status, 'completed');
   assert.equal(store.searchRides({}, { limit: 10, offset: 0 }).total, 1);
@@ -438,6 +441,7 @@ test('emite evenimente la schimbări', () => {
   newRide(store);
   assert.deepEqual(events, [
     ['car', 'a', 'free'],
+    ['ride', '1', 'pending'],
     ['car', 'a', 'busy'],
     ['ride', '1', 'assigned'],
   ]);
@@ -452,7 +456,7 @@ test('cursa reține dispecerul care a creat-o și cine a închis-o', () => {
 
   const r1 = newRide(store).ride;
   assert.equal(r1.createdByName, '');
-  const r2 = store.createRide({ customerName: 'Dan', pickup: PICKUP, carId: 'b' }, maria).ride;
+  const r2 = newRide(store, { customerName: 'Dan', carId: 'b' }, maria).ride;
   assert.equal(r2.createdByName, 'Maria');
   assert.equal(r2.createdById, userId);
 

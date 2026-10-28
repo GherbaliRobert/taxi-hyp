@@ -176,13 +176,13 @@ function createApi({ store, accounts, audit, limiter, config }) {
       if (filters.q) parts.push(`căutare „${filters.q}”`);
       audit.log(req.user, 'history_export', '', parts.join(' · '), req.ip);
     }
-    res.json({ rides: rides.map(rideViewForDispatcher), total, stats: store.rideStats(filters) });
+    res.json({ rides: rides.map((ride) => rideViewForDispatcher(ride)), total, stats: store.rideStats(filters) });
   });
 
   api.get('/rides/:id/route', (req, res) => {
     const ride = store.getRide(req.params.id);
     if (!ride) return res.status(404).json({ error: 'Cursă inexistentă' });
-    res.json({ ride: rideViewForDispatcher(ride), points: store.rideRoute(ride.id) });
+    res.json({ ride: rideViewForDispatcher(ride, store.rideOffers(ride.id)), points: store.rideRoute(ride.id) });
   });
 
   // ---- Flotă (citire: toți; modificări: administratori) ----

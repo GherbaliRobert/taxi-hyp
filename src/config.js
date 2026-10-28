@@ -24,6 +24,32 @@ function number(value, fallback) {
   return value !== undefined && value !== '' && Number.isFinite(n) ? n : fallback;
 }
 
+/** Furnizorul de SMS pentru linkul trimis clientului (vezi src/sms.js). */
+function loadSmsConfig(env) {
+  const sms = {
+    provider: env.SMS_PROVIDER || 'console',
+    countryCode: env.SMS_COUNTRY_CODE || '40',
+    smsgateUrl: env.SMSGATE_URL || '',
+    smsgateUser: env.SMSGATE_USER || '',
+    smsgatePassword: env.SMSGATE_PASSWORD || '',
+    twilioAccountSid: env.TWILIO_ACCOUNT_SID || '',
+    twilioAuthToken: env.TWILIO_AUTH_TOKEN || '',
+    twilioFrom: env.TWILIO_FROM || '',
+    twilioMessagingServiceSid: env.TWILIO_MESSAGING_SERVICE_SID || '',
+  };
+  const missing = {
+    console: [],
+    smsgate: ['SMSGATE_USER', 'SMSGATE_PASSWORD'].filter((k) => !env[k]),
+    twilio: [
+      ...['TWILIO_ACCOUNT_SID', 'TWILIO_AUTH_TOKEN'].filter((k) => !env[k]),
+      ...(env.TWILIO_FROM || env.TWILIO_MESSAGING_SERVICE_SID ? [] : ['TWILIO_FROM']),
+    ],
+  }[sms.provider];
+  if (!missing) throw new Error(`SMS_PROVIDER necunoscut: „${sms.provider}” (console, smsgate sau twilio)`);
+  if (missing.length) throw new Error(`SMS_PROVIDER=${sms.provider} are nevoie de: ${missing.join(', ')}`);
+  return sms;
+}
+
 function loadConfig(env = process.env) {
   const production = env.NODE_ENV === 'production';
   // Parola contului „admin”, folosită o singură dată: la prima pornire, când nu există niciun cont.
@@ -53,7 +79,13 @@ function loadConfig(env = process.env) {
     avgSpeedKmh: number(env.AVG_SPEED_KMH, 25),
     // Activați doar când aplicația rulează în spatele unui reverse proxy (nginx, Caddy).
     trustProxy: env.TRUST_PROXY === '1' || env.TRUST_PROXY === 'true',
+    // Adresa publică a serverului, folosită în linkul din SMS (ex. https://taxi.firma-mea.ro).
+    // Fără ea se folosește adresa de pe care lucrează dispecerul.
+    publicUrl: (env.PUBLIC_URL || '').replace(/\/+$/, ''),
+    // Câte secunde are un șofer să accepte o comandă.
+    offerTimeoutSeconds: number(env.OFFER_TIMEOUT_SECONDS, 60),
+    sms: loadSmsConfig(env),
   };
 }
 
-module.exports = { loadConfig, loadCars };
+module.exports = { loadConfig, loadCars, loadSmsConfig };

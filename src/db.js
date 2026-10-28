@@ -3,7 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const Database = require('better-sqlite3');
 
-const ACTIVE_STATUSES = ['assigned', 'arrived', 'in_progress'];
+// Cursele active, inclusiv comenzile care încă așteaptă un șofer.
+const ACTIVE_STATUSES = ['pending', 'assigned', 'arrived', 'in_progress'];
 
 // Fiecare element este o migrare; versiunea curentă se ține în PRAGMA user_version.
 const MIGRATIONS = [
@@ -112,6 +113,69 @@ const MIGRATIONS = [
   CREATE INDEX driver_sessions_car ON driver_sessions (car_id);
   CREATE INDEX rides_car ON rides (car_id, created_at);
   `,
+  {
+    // Comenzile pot exista fără mașină („se caută șofer”) până când un șofer le acceptă.
+    // SQLite nu poate scoate NOT NULL de pe o coloană, așa că tabelul se reconstruiește.
+    foreignKeysOff: true,
+    sql: `
+  CREATE TABLE rides_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    token TEXT NOT NULL UNIQUE,
+    customer_name TEXT NOT NULL,
+    phone TEXT NOT NULL DEFAULT '',
+    address TEXT NOT NULL DEFAULT '',
+    notes TEXT NOT NULL DEFAULT '',
+    pickup_lat REAL NOT NULL,
+    pickup_lng REAL NOT NULL,
+    car_id TEXT REFERENCES cars (id),
+    car_plate TEXT NOT NULL DEFAULT '',
+    driver_name TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    accepted_at INTEGER,
+    arrived_at INTEGER,
+    started_at INTEGER,
+    finished_at INTEGER,
+    distance_m REAL NOT NULL DEFAULT 0,
+    created_by_id INTEGER REFERENCES users (id),
+    created_by_name TEXT NOT NULL DEFAULT '',
+    closed_by_name TEXT NOT NULL DEFAULT '',
+    -- Adresa publică a serverului pentru linkul din SMS (de pe care lucra dispecerul).
+    link_base TEXT NOT NULL DEFAULT '',
+    -- SMS-ul către client: sending | sent | simulated | failed | no_phone | invalid_phone
+    sms_status TEXT NOT NULL DEFAULT '',
+    sms_detail TEXT NOT NULL DEFAULT '',
+    sms_at INTEGER
+  );
+  INSERT INTO rides_new (id, token, customer_name, phone, address, notes, pickup_lat, pickup_lng, car_id, car_plate,
+                         driver_name, status, created_at, updated_at, accepted_at, arrived_at, started_at, finished_at,
+                         distance_m, created_by_id, created_by_name, closed_by_name)
+    SELECT id, token, customer_name, phone, address, notes, pickup_lat, pickup_lng, car_id, car_plate,
+           driver_name, status, created_at, updated_at, created_at, arrived_at, started_at, finished_at,
+           distance_m, created_by_id, created_by_name, closed_by_name
+    FROM rides;
+  DROP TABLE rides;
+  ALTER TABLE rides_new RENAME TO rides;
+  CREATE INDEX rides_created ON rides (created_at);
+  CREATE INDEX rides_status ON rides (status);
+  CREATE INDEX rides_car ON rides (car_id, created_at);
+
+  -- Ofertele trimise șoferilor: cine a primit comanda și ce a răspuns.
+  CREATE TABLE ride_offers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ride_id INTEGER NOT NULL REFERENCES rides (id) ON DELETE CASCADE,
+    car_id TEXT NOT NULL REFERENCES cars (id),
+    offered_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    -- accepted | declined | expired | taken (alt șofer a acceptat) | withdrawn (comandă anulată / retrimisă)
+    response TEXT,
+    responded_at INTEGER
+  );
+  CREATE INDEX ride_offers_ride ON ride_offers (ride_id);
+  CREATE INDEX ride_offers_open ON ride_offers (response, expires_at);
+  `,
+  },
 ];
 
 function openDatabase(file) {
@@ -127,10 +191,21 @@ function openDatabase(file) {
 function migrate(db) {
   const current = db.pragma('user_version', { simple: true });
   for (let version = current; version < MIGRATIONS.length; version++) {
-    db.transaction(() => {
-      db.exec(MIGRATIONS[version]);
-      db.pragma(`user_version = ${version + 1}`);
-    })();
+    const migration = typeof MIGRATIONS[version] === 'string' ? { sql: MIGRATIONS[version] } : MIGRATIONS[version];
+    // Reconstruirea unui tabel cere cheile externe oprite (în afara tranzacției) și verificate la final.
+    if (migration.foreignKeysOff) db.pragma('foreign_keys = OFF');
+    try {
+      db.transaction(() => {
+        db.exec(migration.sql);
+        if (migration.foreignKeysOff) {
+          const problems = db.pragma('foreign_key_check');
+          if (problems.length) throw new Error(`Migrarea ${version + 1}: chei externe invalide (${problems.length})`);
+        }
+        db.pragma(`user_version = ${version + 1}`);
+      })();
+    } finally {
+      if (migration.foreignKeysOff) db.pragma('foreign_keys = ON');
+    }
   }
 }
 
@@ -151,7 +226,8 @@ function rowToCar(r) {
 }
 
 function rowToRide(r) {
-  const statusTimes = { assigned: r.created_at };
+  const statusTimes = { pending: r.created_at };
+  if (r.accepted_at !== null) statusTimes.assigned = r.accepted_at;
   if (r.arrived_at !== null) statusTimes.arrived = r.arrived_at;
   if (r.started_at !== null) statusTimes.in_progress = r.started_at;
   if (r.finished_at !== null) statusTimes[r.status] = r.finished_at;
@@ -174,6 +250,8 @@ function rowToRide(r) {
     createdById: r.created_by_id,
     createdByName: r.created_by_name,
     closedByName: r.closed_by_name,
+    linkBase: r.link_base,
+    sms: { status: r.sms_status, detail: r.sms_detail, at: r.sms_at },
   };
 }
 
@@ -197,6 +275,10 @@ function rideParams(ride) {
     id: Number(ride.id),
     status: ride.status,
     updatedAt: ride.updatedAt,
+    carId: ride.carId,
+    carPlate: ride.carPlate,
+    driverName: ride.driverName,
+    acceptedAt: t.assigned ?? null,
     arrivedAt: t.arrived ?? null,
     startedAt: t.in_progress ?? null,
     finishedAt: t.completed ?? t.cancelled ?? null,
@@ -277,16 +359,27 @@ function createRepository(db) {
     insertRide: db.prepare(
       `INSERT INTO rides (token, customer_name, phone, address, notes, pickup_lat, pickup_lng,
                           car_id, car_plate, driver_name, status, created_at, updated_at,
-                          created_by_id, created_by_name)
+                          created_by_id, created_by_name, link_base)
        VALUES (@token, @customerName, @phone, @address, @notes, @pickupLat, @pickupLng,
                @carId, @carPlate, @driverName, @status, @createdAt, @updatedAt,
-               @createdById, @createdByName)`
+               @createdById, @createdByName, @linkBase)`
     ),
     updateRide: db.prepare(
       `UPDATE rides SET status = @status, updated_at = @updatedAt, arrived_at = @arrivedAt,
                         started_at = @startedAt, finished_at = @finishedAt, distance_m = @distanceM,
-                        closed_by_name = @closedByName
+                        closed_by_name = @closedByName, car_id = @carId, car_plate = @carPlate,
+                        driver_name = @driverName, accepted_at = @acceptedAt
        WHERE id = @id`
+    ),
+    saveSms: db.prepare('UPDATE rides SET sms_status = ?, sms_detail = ?, sms_at = ? WHERE id = ?'),
+    insertOffer: db.prepare(
+      'INSERT INTO ride_offers (ride_id, car_id, offered_at, expires_at) VALUES (@rideId, @carId, @offeredAt, @expiresAt)'
+    ),
+    answerOffer: db.prepare('UPDATE ride_offers SET response = @response, responded_at = @respondedAt WHERE id = @id'),
+    rideOffers: db.prepare(
+      `SELECT o.id, o.ride_id AS rideId, o.car_id AS carId, o.offered_at AS offeredAt, o.expires_at AS expiresAt,
+              o.response, o.responded_at AS respondedAt
+       FROM ride_offers o WHERE o.ride_id = ? ORDER BY o.id`
     ),
     saveDistance: db.prepare('UPDATE rides SET distance_m = ? WHERE id = ?'),
     insertPoint: db.prepare('INSERT INTO ride_points (ride_id, ts, lat, lng, status) VALUES (?, ?, ?, ?, ?)'),
@@ -297,8 +390,8 @@ function createRepository(db) {
     rideByToken: db.prepare('SELECT * FROM rides WHERE token = ?'),
     latestRideForCar: db.prepare('SELECT * FROM rides WHERE car_id = ? ORDER BY created_at DESC, id DESC LIMIT 1'),
     recentFinished: db.prepare(
-      `SELECT * FROM rides WHERE status IN ('completed', 'cancelled') AND finished_at >= ?
-       ORDER BY finished_at DESC LIMIT ?`
+      `SELECT * FROM rides WHERE status IN ('completed', 'cancelled') AND updated_at >= ?
+       ORDER BY updated_at DESC LIMIT ?`
     ),
     ridePoints: db.prepare('SELECT ts, lat, lng, status FROM ride_points WHERE ride_id = ? ORDER BY ts, rowid'),
     prunePoints: db.prepare('DELETE FROM ride_points WHERE ts < ?'),
@@ -359,6 +452,10 @@ function createRepository(db) {
       return String(info.lastInsertRowid);
     },
     updateRide: (ride) => st.updateRide.run(rideParams(ride)),
+    saveRideSms: (id, sms) => st.saveSms.run(sms.status, sms.detail, sms.at, Number(id)),
+    insertOffer: (offer) => Number(st.insertOffer.run({ ...offer, rideId: Number(offer.rideId) }).lastInsertRowid),
+    answerOffer: (offer) => st.answerOffer.run({ id: offer.id, response: offer.response, respondedAt: offer.respondedAt }),
+    rideOffers: (rideId) => st.rideOffers.all(Number(rideId)).map((o) => ({ ...o, rideId: String(o.rideId) })),
     saveRideDistance: (id, meters) => st.saveDistance.run(meters, Number(id)),
     addRidePoint: (id, pos, status) => st.insertPoint.run(Number(id), pos.ts, pos.lat, pos.lng, status),
     activeRides: () => st.activeRides.all().map(rowToRide),
@@ -395,6 +492,8 @@ function createRepository(db) {
                   COALESCE(SUM(r.status = 'completed'), 0) AS completed,
                   COALESCE(SUM(r.status = 'cancelled'), 0) AS cancelled,
                   COALESCE(SUM(CASE WHEN r.status = 'completed' THEN r.distance_m END), 0) AS distanceM,
+                  COALESCE(SUM(r.car_id IS NULL AND r.status = 'cancelled'), 0) AS unassigned,
+                  AVG(r.accepted_at - r.created_at) AS avgAcceptMs,
                   AVG(r.arrived_at - r.created_at) AS avgPickupMs,
                   AVG(CASE WHEN r.status = 'completed' THEN r.finished_at - r.started_at END) AS avgRideMs
            FROM rides r ${sql}`
@@ -417,7 +516,7 @@ function createRepository(db) {
                   SUM(r.status = 'completed') AS completed,
                   SUM(r.status = 'cancelled') AS cancelled,
                   COALESCE(SUM(CASE WHEN r.status = 'completed' THEN r.distance_m END), 0) AS distanceM
-           FROM rides r ${sql}
+           FROM rides r ${sql ? sql + ' AND' : 'WHERE'} r.car_id IS NOT NULL
            GROUP BY r.car_id, r.driver_name
            ORDER BY completed DESC, total DESC, carPlate`
         )

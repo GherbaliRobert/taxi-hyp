@@ -41,9 +41,10 @@
     socket.on('connect_error', (err) => {
       if (err.message === 'not_found') {
         socket.disconnect();
+        // Linkul funcționează doar cât timp cursa e în desfășurare.
         showMessage(
-          'Link invalid sau expirat',
-          'Cursa nu a fost găsită. Dacă ați comandat un taxi, sunați la dispecerat pentru detalii.'
+          'Linkul nu mai este valabil',
+          'Cursa s-a încheiat sau linkul este greșit. Pentru o comandă nouă sau detalii, sunați la dispecerat.'
         );
       } else {
         UI.setConnection($('conn'), 'offline');
@@ -53,8 +54,14 @@
   }
 
   function render(view) {
-    lastView = view;
     const { ride, car } = view;
+    // Cursa s-a încheiat: linkul nu mai arată harta, mașina sau șoferul.
+    if (ride.status === 'completed' || ride.status === 'cancelled') {
+      socket.disconnect();
+      const { title, detail } = describe(view);
+      return showMessage(title, detail);
+    }
+    lastView = view;
 
     $('car').hidden = false;
     $('plate').textContent = car.plate;
@@ -89,12 +96,6 @@
     }
 
     fitMap(view, !fittedOnce);
-
-    if (ride.status === 'completed' || ride.status === 'cancelled') {
-      // Cursa s-a încheiat: nu mai urmărim mașina.
-      socket.disconnect();
-      $('conn').hidden = true;
-    }
   }
 
   function describe({ ride, car, distanceM, etaMin }) {

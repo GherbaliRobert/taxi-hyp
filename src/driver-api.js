@@ -2,7 +2,7 @@
 // Aplicația de telefon folosește HTTP nativ, care funcționează și când aplicația e în fundal
 // (Android încetinește conexiunile paginii după câteva minute în fundal).
 const express = require('express');
-const { rideViewForDriver } = require('./views');
+const { rideViewForDriver, offerViewForDriver } = require('./views');
 
 function bearerToken(req) {
   const header = req.get('authorization') || '';
@@ -13,11 +13,19 @@ function createDriverApi({ store, limiter }) {
   const router = express.Router();
   router.use(express.json({ limit: '10kb' }));
 
-  /** Starea curentă a șoferului: mașina și cursa (activă sau abia încheiată), pentru notificări în aplicație. */
+  /**
+   * Starea curentă a șoferului: mașina, cursa (activă sau abia încheiată) și comenzile oferite acum.
+   * Aplicația o primește la fiecare poziție trimisă, deci află de comenzi noi și din fundal.
+   */
   function driverState(carId) {
     const car = store.getCarView(carId);
     const ride = store.driverRide(carId);
-    return { car: { id: car.id, plate: car.plate, status: car.status, rideId: car.rideId }, ride: ride ? rideViewForDriver(ride) : null };
+    const offers = store.carOffers(carId).map(({ offer, ride: order }) => offerViewForDriver(offer, order, car, store.avgSpeedKmh));
+    return {
+      car: { id: car.id, plate: car.plate, status: car.status, rideId: car.rideId },
+      ride: ride ? rideViewForDriver(ride) : null,
+      offers,
+    };
   }
 
   router.post('/login', (req, res) => {
@@ -49,6 +57,24 @@ function createDriverApi({ store, limiter }) {
     const result = store.updateLocation(req.carId, req.body);
     if (!result.ok) return res.status(400).json(result);
     // Răspunsul conține și cursa curentă: așa află aplicația de o cursă nouă chiar din fundal.
+    res.json({ ok: true, ...driverState(req.carId) });
+  });
+
+  router.post('/offers/:rideId/accept', (req, res) => {
+    const result = store.acceptOffer(req.params.rideId, req.carId);
+    if (!result.ok) return res.status(409).json({ ...result, ...driverState(req.carId) });
+    res.json({ ok: true, ...driverState(req.carId) });
+  });
+
+  router.post('/offers/:rideId/decline', (req, res) => {
+    store.declineOffer(req.params.rideId, req.carId);
+    res.json({ ok: true, ...driverState(req.carId) });
+  });
+
+  router.post('/rides/:rideId/status', (req, res) => {
+    const status = req.body && req.body.status;
+    const result = store.updateRideStatus(req.params.rideId, status, { role: 'driver', carId: req.carId });
+    if (!result.ok) return res.status(400).json({ ...result, ...driverState(req.carId) });
     res.json({ ok: true, ...driverState(req.carId) });
   });
 

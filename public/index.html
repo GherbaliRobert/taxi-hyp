@@ -72,12 +72,12 @@
               <input class="input" id="ride-notes" maxlength="300" placeholder="ex. bagaje, scaun copil" autocomplete="off">
             </div>
             <div class="field">
-              <label for="ride-car">Mașina</label>
-              <select class="input" id="ride-car"></select>
-              <span class="hint">Mașinile libere, ordonate după distanța până la client.</span>
+              <label for="ride-target">Trimite comanda la</label>
+              <select class="input" id="ride-target"></select>
+              <span class="hint">Primul șofer care acceptă primește cursa; clientul primește apoi SMS cu linkul de urmărire.</span>
             </div>
             <p class="error-text" id="ride-error"></p>
-            <button class="btn btn-primary btn-block" type="submit">Trimite cursa</button>
+            <button class="btn btn-primary btn-block" type="submit">Trimite comanda</button>
           </form>
           <div id="ride-result" hidden></div>
         </section>

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Simulator pentru demonstrații: conectează mașinile din flotă ca „șoferi” și le plimbă prin oraș.
-// Mașinile răspund la cursele trimise din dispecerat: merg la client, îl preiau și îl duc la destinație.
+// Mașinile primesc comenzile din dispecerat ca niște șoferi: le acceptă (70%), le refuză (20%) sau le
+// ignoră (10%); cu o comandă acceptată merg la client, îl preiau și îl duc la destinație.
 //
 //   npm run simulate                    toate mașinile, pe străzi (rutare OSRM)
 //   npm run simulate -- --cars 3        doar primele 3 mașini
@@ -107,8 +108,12 @@ class SimulatedCar {
     this.socket.on('connect', () => this.log('conectat'));
     this.socket.on('disconnect', () => this.log('deconectat'));
     this.socket.on('connect_error', (err) => this.log(`eroare de conectare: ${err.message}`));
-    this.socket.on('driver:init', ({ ride }) => ride && this.onRide(ride));
+    this.socket.on('driver:init', ({ ride, offers }) => {
+      if (ride) this.onRide(ride);
+      (offers || []).forEach((offer) => this.onOffer(offer));
+    });
     this.socket.on('ride:update', (ride) => this.onRide(ride));
+    this.socket.on('offer:new', (offer) => this.onOffer(offer));
     this.cruise();
     this.timer = setInterval(() => this.tick(), TICK_MS);
   }
@@ -133,6 +138,25 @@ class SimulatedCar {
   cruise() {
     this.phase = 'cruise';
     this.goTo(randomPoint(CENTER, AREA_RADIUS_M));
+  }
+
+  /** Comandă nouă: șoferul simulat se gândește câteva secunde, apoi acceptă, refuză sau o ignoră. */
+  onOffer(offer) {
+    if (this.ride) return;
+    const where = offer.address || 'punct pe hartă';
+    const choice = Math.random();
+    if (choice < 0.7) {
+      setTimeout(() => {
+        this.socket.emit('offer:accept', { rideId: offer.rideId }, (res) => {
+          if (res.ok) this.log(`a acceptat comanda #${offer.rideId} (${where})`);
+          else this.log(`nu a prins comanda #${offer.rideId}: ${res.error}`);
+        });
+      }, rand(2000, 6000) / SPEED_FACTOR);
+    } else if (choice < 0.9) {
+      setTimeout(() => {
+        this.socket.emit('offer:decline', { rideId: offer.rideId }, () => this.log(`a refuzat comanda #${offer.rideId}`));
+      }, rand(2000, 5000) / SPEED_FACTOR);
+    }
   }
 
   onRide(ride) {

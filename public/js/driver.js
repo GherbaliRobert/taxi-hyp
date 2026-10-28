@@ -46,6 +46,11 @@
   let pickupMarker = null;
   let centeredOnce = false;
   let audio = null;
+  // Comenzile oferite acum acestei mașini (id comandă -> ofertă), și cea pe care tocmai o acceptăm.
+  const offers = new Map();
+  let accepting = null;
+  let offerPins = [];
+  let shownOffers = '';
 
   init().catch((err) => {
     console.error(err);
@@ -64,6 +69,8 @@
     });
     $('change-server').addEventListener('click', () => showServerStep());
     $('logout').addEventListener('click', logout);
+    // Secundele rămase pentru a accepta comenzile.
+    setInterval(updateOfferCountdowns, 1000);
     $('gps-toggle').addEventListener('click', () => {
       unlockAudio();
       if (gpsOn) stopGps();
@@ -280,8 +287,11 @@
     socket.on('driver:init', (data) => {
       car = data.car;
       setRide(data.ride, false);
+      setOffers(data.offers || [], true);
       renderStatus();
     });
+    socket.on('offer:new', (offer) => addOffer(offer, true));
+    socket.on('offer:gone', ({ rideId, reason }) => removeOffer(rideId, reason));
     socket.on('car:update', (data) => {
       car = data;
       renderStatus();
@@ -323,6 +333,7 @@
       car = { ...car, status: state.car.status, rideId: state.car.rideId };
       renderStatus();
     }
+    if (state.offers) setOffers(state.offers, true);
     // `state.ride` este cursa activă sau ultima încheiată recent (ex. anulată de dispecer).
     const incoming = state.ride;
     if (!incoming) {
@@ -369,12 +380,15 @@
     } else {
       const isNew = !ride || ride.id !== data.id;
       ride = data;
-      if (isNew && fromUpdate) {
+      offers.delete(data.id);
+      // O cursă primită fără ca șoferul s-o fi acceptat chiar acum (ex. reluată după repornire).
+      if (isNew && fromUpdate && data.id !== accepting) {
         alertDriver();
         notify(Number(data.id), 'Cursă nouă #' + data.id, (data.address || 'Punct pe hartă') + ' · ' + data.customerName);
       }
     }
     renderRide();
+    renderOffers();
   }
 
   function renderRide() {
@@ -435,25 +449,151 @@
         class: 'btn ' + style,
         type: 'button',
         style: 'grid-column: span 2; padding: 14px',
-        onclick: (e) => {
+        onclick: async (e) => {
           e.currentTarget.disabled = true;
-          socket.emit('ride:status', { rideId: ride.id, status }, (res) => {
-            if (!res.ok) {
-              UI.toast(res.error, 'error');
-              renderRide();
-            }
-          });
+          try {
+            const res = await request('POST', '/api/driver/rides/' + encodeURIComponent(ride.id) + '/status', { status }, session.token);
+            if (res.status === 401) return sessionEnded('Sesiunea a expirat. Intrați din nou.');
+            if (res.status !== 200) UI.toast((res.data && res.data.error) || 'Eroare', 'error');
+            if (res.data && res.data.car) applyServerState(res.data);
+            else renderRide();
+          } catch {
+            UI.toast('Fără conexiune la server — încercați din nou', 'error');
+            renderRide();
+          }
         },
       },
       label
     );
   }
 
+  // ---------- Comenzi oferite: șoferul le acceptă sau le refuză ----------
+
+  /** Lista completă de la server (la conectare sau din răspunsul HTTP); anunță comenzile noi. */
+  function setOffers(list, announce) {
+    const incoming = new Map(list.map((o) => [o.rideId, o]));
+    for (const id of [...offers.keys()]) if (!incoming.has(id)) offers.delete(id);
+    for (const offer of list) addOffer(offer, announce, false);
+    renderOffers();
+  }
+
+  function addOffer(offer, announce, render = true) {
+    if (offers.has(offer.rideId) || (ride && ride.id === offer.rideId)) return;
+    offers.set(offer.rideId, offer);
+    if (announce) {
+      alertDriver();
+      const where = (offer.address || 'Punct pe hartă') + (offer.distanceM !== null ? ' · la ' + Geo.formatDistance(offer.distanceM) : '');
+      notify(Number(offer.rideId), 'Comandă nouă', where + '. Deschideți aplicația ca s-o acceptați.');
+    }
+    if (render) renderOffers();
+  }
+
+  function removeOffer(rideId, reason) {
+    if (!offers.delete(rideId)) return;
+    if (reason === 'taken' && accepting !== rideId) UI.toast('Comanda a fost preluată de alt coleg');
+    if (reason === 'withdrawn') UI.toast('Comanda a fost anulată de dispecerat');
+    renderOffers();
+  }
+
+  function renderOffers() {
+    const box = $('offers');
+    const now = Date.now();
+    const list = [...offers.values()].filter((o) => o.expiresAt > now).sort((a, b) => a.offeredAt - b.offeredAt);
+    box.replaceChildren(...list.map(offerCard));
+    // Pe hartă: unde sunt clienții care așteaptă.
+    offerPins.forEach((pin) => pin.remove());
+    offerPins = map && !ride ? list.map((o) => L.marker([o.pickup.lat, o.pickup.lng], { icon: UI.pickupIcon('pending') }).addTo(map)) : [];
+    // Harta se reîncadrează doar când apare sau dispare o comandă, nu la fiecare actualizare.
+    const key = list.map((o) => o.rideId).join(',');
+    if (map && !ride && list.length && key !== shownOffers) {
+      const points = list.map((o) => [o.pickup.lat, o.pickup.lng]);
+      if (carMarker) points.push(carMarker.getLatLng());
+      map.fitBounds(points, { padding: [40, 40], maxZoom: 16 });
+    }
+    shownOffers = key;
+  }
+
+  function offerCard(offer) {
+    const total = offer.expiresAt - offer.offeredAt;
+    const distance =
+      offer.distanceM !== null
+        ? 'La ' + Geo.formatDistance(offer.distanceM) + ' de dvs.' + (offer.etaMin ? ' · ajungeți în cca ' + offer.etaMin + ' min' : '')
+        : 'Porniți GPS-ul ca să vedeți distanța';
+    return el(
+      'div',
+      { class: 'card offer-card' },
+      el('div', { class: 'gps-line' }, el('h2', {}, 'Comandă nouă'), el('span', { class: 'offer-countdown', dataset: { expires: offer.expiresAt } }, secondsLeft(offer.expiresAt))),
+      el('div', { class: 'address' }, offer.address || 'Punct pe hartă: ' + offer.pickup.lat.toFixed(5) + ', ' + offer.pickup.lng.toFixed(5)),
+      el('div', {}, distance),
+      offer.notes ? el('div', {}, 'Observații: ' + offer.notes) : null,
+      el('div', { class: 'offer-progress' }, el('span', { dataset: { expires: offer.expiresAt, total }, style: 'width:' + progress(offer.expiresAt, total) + '%' })),
+      el(
+        'div',
+        { class: 'grid' },
+        el('button', { class: 'btn btn-accept', type: 'button', onclick: (e) => acceptOffer(offer.rideId, e.currentTarget) }, 'Accept'),
+        el('button', { class: 'btn', type: 'button', onclick: () => declineOffer(offer.rideId) }, 'Refuz')
+      )
+    );
+  }
+
+  function secondsLeft(expiresAt) {
+    return Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000)) + ' s';
+  }
+
+  function progress(expiresAt, total) {
+    return Math.max(0, Math.min(100, ((expiresAt - Date.now()) / total) * 100));
+  }
+
+  function updateOfferCountdowns() {
+    if (![...offers.values()].length) return;
+    if ([...offers.values()].some((o) => o.expiresAt <= Date.now())) {
+      for (const [id, o] of offers) if (o.expiresAt <= Date.now()) offers.delete(id);
+      return renderOffers();
+    }
+    document.querySelectorAll('.offer-countdown[data-expires]').forEach((n) => (n.textContent = secondsLeft(Number(n.dataset.expires))));
+    document.querySelectorAll('.offer-progress span').forEach((n) => (n.style.width = progress(Number(n.dataset.expires), Number(n.dataset.total)) + '%'));
+  }
+
+  async function acceptOffer(rideId, button) {
+    button.disabled = true;
+    accepting = rideId;
+    try {
+      const res = await request('POST', '/api/driver/offers/' + encodeURIComponent(rideId) + '/accept', {}, session.token);
+      if (res.status === 401) return sessionEnded('Sesiunea a expirat. Intrați din nou.');
+      // Cursa acceptată de dvs. apare fără alarmă; datele clientului sunt vizibile abia acum.
+      if (res.data && res.data.ride && res.data.ride.id === rideId) setRide(res.data.ride, false);
+      if (res.data && res.data.car) applyServerState(res.data);
+      if (res.status === 200) {
+        UI.toast('Ați preluat comanda. Clientul primește SMS cu linkul de urmărire.', 'success');
+      } else {
+        UI.toast((res.data && res.data.error) || 'Comanda nu mai este disponibilă', 'error');
+        offers.delete(rideId);
+        renderOffers();
+      }
+    } catch {
+      button.disabled = false;
+      UI.toast('Fără conexiune la server — încercați din nou', 'error');
+    } finally {
+      accepting = null;
+    }
+  }
+
+  async function declineOffer(rideId) {
+    offers.delete(rideId);
+    renderOffers();
+    try {
+      await request('POST', '/api/driver/offers/' + encodeURIComponent(rideId) + '/decline', {}, session.token);
+    } catch {
+      // Fără rețea: oferta expiră oricum la server.
+    }
+  }
+
   /** Semnal sonor + vibrație la o cursă nouă (cu aplicația deschisă). */
   function alertDriver() {
-    $('ride-card').classList.remove('flash');
-    void $('ride-card').offsetWidth;
-    $('ride-card').classList.add('flash');
+    const target = offers.size ? $('offers') : $('ride-card');
+    target.classList.remove('flash');
+    void target.offsetWidth;
+    target.classList.add('flash');
     if (navigator.vibrate) navigator.vibrate([300, 150, 300, 150, 300]);
     if (!audio) return;
     try {
