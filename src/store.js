@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const Geo = require('../shared/geo');
-const { hashSecret: hashPin, verifySecret: verifyPin, isValidPin } = require('./secret');
+const { hashSecret: hashPin, verifySecret: verifyPin, isValidPin, hashToken } = require('./secret');
 
 const CAR_STATUSES = ['free', 'busy', 'offline'];
 const RIDE_STATUSES = ['assigned', 'arrived', 'in_progress', 'completed', 'cancelled'];
@@ -29,6 +29,12 @@ const ROUTE_POINT_INTERVAL_MS = 10 * 1000;
 // Filtre pentru kilometraj: ignorăm pozițiile imprecise și salturile GPS imposibile.
 const ODOMETER_MAX_ACCURACY_M = 50;
 const ODOMETER_MAX_SPEED_MS = 60; // ~216 km/h
+// Aplicația de telefon trimite poziția prin HTTP (și din fundal): mașina e „conectată”
+// cât timp a trimis ceva în ultimul minut, chiar dacă WebSocket-ul e întrerupt.
+const HTTP_PRESENCE_MS = 60 * 1000;
+// Sesiunea șoferului expiră după 30 de zile fără activitate.
+const DRIVER_SESSION_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
+const DRIVER_SESSION_TOUCH_MS = 10 * 60 * 1000;
 
 function cleanText(value, maxLength) {
   if (value === undefined || value === null) return '';
@@ -99,6 +105,7 @@ class FleetStore extends EventEmitter {
       createdAt: record.createdAt,
       status: 'offline',
       connections: 0,
+      httpSeenAt: 0,
       rideId: null,
       position: record.lastPosition,
       trail: [],
@@ -248,7 +255,7 @@ class FleetStore extends EventEmitter {
     if (data.pin) car.pinHash = hashPin(data.pin);
     this.repo.updateCar(this._carRecord(car));
     this.emit('car', car);
-    if (data.pin) this.emit('car:revoked', car);
+    if (data.pin) this._revokeDriver(car);
     return { ok: true, car: this.adminCars().find((c) => c.id === car.id), changes };
   }
 
@@ -261,8 +268,101 @@ class FleetStore extends EventEmitter {
     car.active = Boolean(active);
     this.repo.updateCar(this._carRecord(car));
     this.emit('car', car);
-    if (!car.active) this.emit('car:revoked', car);
+    if (!car.active) this._revokeDriver(car);
     return { ok: true, changed: true };
+  }
+
+  /** PIN schimbat sau mașină dezactivată: toate sesiunile șoferului se închid. */
+  _revokeDriver(car) {
+    this.repo.deleteCarDriverSessions(car.id);
+    car.httpSeenAt = 0;
+    this.emit('car:revoked', car);
+    this._updatePresence(car);
+  }
+
+  // ---- Sesiunile șoferilor ----
+
+  /** Autentificarea șoferului cu mașina și PIN-ul; întoarce un token pentru aplicație sau pagina web. */
+  createDriverSession(carId, pin, { device = '' } = {}) {
+    if (!this.verifyDriver(carId, pin)) return { ok: false, error: 'PIN greșit pentru mașina aleasă' };
+    const car = this.cars.get(carId);
+    const token = crypto.randomBytes(32).toString('base64url');
+    const ts = this.now();
+    this.repo.insertDriverSession({
+      tokenHash: hashToken(token),
+      carId,
+      createdAt: ts,
+      lastSeenAt: ts,
+      device: String(device).slice(0, 100),
+    });
+    return { ok: true, token, car: { id: car.id, plate: car.plate, model: car.model } };
+  }
+
+  /** Mașina sesiunii, sau null dacă tokenul e necunoscut, expirat ori mașina e dezactivată. */
+  authenticateDriverToken(token) {
+    if (typeof token !== 'string' || !token) return null;
+    const tokenHash = hashToken(token);
+    const session = this.repo.driverSession(tokenHash);
+    if (!session) return null;
+    const ts = this.now();
+    const car = this.cars.get(session.car_id);
+    if (!car || !car.active || ts - session.last_seen_at > DRIVER_SESSION_IDLE_MS) {
+      this.repo.deleteDriverSession(tokenHash);
+      return null;
+    }
+    if (ts - session.last_seen_at >= DRIVER_SESSION_TOUCH_MS) this.repo.touchDriverSession(tokenHash, ts);
+    return car.id;
+  }
+
+  /** Ieșirea din aplicație: sesiunea se închide, iar mașina apare deconectată imediat. */
+  endDriverSession(token) {
+    const carId = this.authenticateDriverToken(token);
+    if (!carId) return;
+    this.repo.deleteDriverSession(hashToken(token));
+    const car = this.cars.get(carId);
+    car.httpSeenAt = 0;
+    this._updatePresence(car);
+  }
+
+  pruneDriverSessions() {
+    return this.repo.pruneDriverSessions(this.now() - DRIVER_SESSION_IDLE_MS);
+  }
+
+  // ---- Prezența șoferului (WebSocket sau HTTP din aplicație) ----
+
+  _isOnline(car) {
+    return car.connections > 0 || this.now() - car.httpSeenAt <= HTTP_PRESENCE_MS;
+  }
+
+  /** Recalculează liber/ocupat/deconectat după conexiuni; emite 'car' dacă s-a schimbat. */
+  _updatePresence(car) {
+    const online = this._isOnline(car);
+    if (online && car.status === 'offline') {
+      car.status = car.rideId ? 'busy' : 'free';
+    } else if (!online && car.status !== 'offline') {
+      car.status = 'offline';
+      if (car.position) this.repo.saveCarPosition(car.id, car.position);
+    } else {
+      return false;
+    }
+    this.emit('car', car);
+    return true;
+  }
+
+  /** Semnal de la aplicație (poziție trimisă prin HTTP). */
+  driverHeartbeat(carId) {
+    const car = this.cars.get(carId);
+    if (!car) return;
+    car.httpSeenAt = this.now();
+    car.lastSeen = car.httpSeenAt;
+    this._updatePresence(car);
+  }
+
+  /** Rulat periodic: mașinile care nu mai trimit nimic devin „deconectate”. */
+  sweepPresence() {
+    for (const car of this.cars.values()) {
+      if (car.status !== 'offline') this._updatePresence(car);
+    }
   }
 
   driverConnected(carId) {
@@ -280,11 +380,7 @@ class FleetStore extends EventEmitter {
     const car = this.cars.get(carId);
     if (!car) return;
     car.connections = Math.max(0, car.connections - 1);
-    if (car.connections === 0) {
-      car.status = 'offline';
-      if (car.position) this.repo.saveCarPosition(car.id, car.position);
-      this.emit('car', car);
-    }
+    this._updatePresence(car);
   }
 
   updateLocation(carId, data) {
@@ -453,12 +549,24 @@ class FleetStore extends EventEmitter {
       this._untrackRide(ride);
       if (car && car.rideId === ride.id) {
         car.rideId = null;
-        car.status = car.connections > 0 ? 'free' : 'offline';
+        car.status = this._isOnline(car) ? 'free' : 'offline';
         this.emit('car', car);
       }
     }
     this.emit('ride', ride);
     return { ok: true, ride };
+  }
+
+  /**
+   * Cursa care interesează aplicația șoferului: cea activă sau, dacă nu are, ultima încheiată în
+   * ultimele `withinMs` (ca aplicația din fundal să afle că o cursă a fost anulată).
+   */
+  driverRide(carId, withinMs = 10 * 60 * 1000) {
+    const car = this.cars.get(carId);
+    if (!car) return null;
+    if (car.rideId) return this.rides.get(car.rideId) || null;
+    const latest = this.repo.latestRideForCar(carId);
+    return latest && FINISHED.has(latest.status) && this.now() - latest.updatedAt <= withinMs ? latest : null;
   }
 
   getRide(rideId) {

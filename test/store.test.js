@@ -470,3 +470,84 @@ test('cursa reține dispecerul care a creat-o și cine a închis-o', () => {
     ]
   );
 });
+
+// ---------- Aplicația șoferului: sesiuni și prezență prin HTTP ----------
+
+test('sesiunea șoferului: token în loc de PIN, închisă la PIN nou sau dezactivare', () => {
+  const { store, repo } = setup();
+  const revoked = [];
+  store.on('car:revoked', (c) => revoked.push(c.id));
+  assert.match(store.createDriverSession('a', '9999').error, /PIN greșit/);
+  assert.equal(store.createDriverSession('zzz', '1111').ok, false);
+
+  const { token, car } = store.createDriverSession('a', '1111', { device: 'Android 14' });
+  assert.deepEqual(car, { id: 'a', plate: 'B 01 AAA', model: 'Logan' });
+  assert.equal(store.authenticateDriverToken(token), 'a');
+  assert.equal(repo.driverSession(token), null); // în baza de date doar hash-ul
+  assert.equal(store.authenticateDriverToken(token + 'x'), null);
+  assert.equal(store.authenticateDriverToken(undefined), null);
+
+  store.updateCar('a', { plate: 'B 01 AAA', model: 'Logan', driver: 'Ion Popescu', pin: '4321' });
+  assert.equal(store.authenticateDriverToken(token), null);
+  const second = store.createDriverSession('a', '4321').token;
+  store.setCarActive('a', false);
+  assert.equal(store.authenticateDriverToken(second), null);
+  assert.deepEqual(revoked, ['a', 'a']);
+});
+
+test('sesiunea șoferului expiră după 30 de zile fără activitate', () => {
+  const { store, clock } = setup();
+  const { token } = store.createDriverSession('a', '1111');
+  clock.advance(29 * 24 * 60 * 60 * 1000);
+  assert.equal(store.authenticateDriverToken(token), 'a'); // activitatea o prelungește
+  clock.advance(29 * 24 * 60 * 60 * 1000);
+  assert.equal(store.authenticateDriverToken(token), 'a');
+  clock.advance(31 * 24 * 60 * 60 * 1000);
+  assert.equal(store.authenticateDriverToken(token), null);
+});
+
+test('prezența prin HTTP: aplicația din fundal ține mașina conectată', () => {
+  const { store, clock } = setup();
+  store.driverHeartbeat('a');
+  assert.equal(store.getCarView('a').status, 'free');
+
+  // WebSocket-ul se întrerupe (Android îl încetinește în fundal), dar aplicația trimite încă poziția.
+  store.driverConnected('a');
+  store.driverDisconnected('a');
+  assert.equal(store.getCarView('a').status, 'free');
+
+  clock.advance(30 * 1000);
+  store.driverHeartbeat('a');
+  clock.advance(45 * 1000);
+  store.sweepPresence();
+  assert.equal(store.getCarView('a').status, 'free');
+
+  clock.advance(20 * 1000); // peste un minut fără semnal
+  store.sweepPresence();
+  assert.equal(store.getCarView('a').status, 'offline');
+
+  store.driverHeartbeat('a');
+  const { ride } = newRide(store);
+  assert.equal(store.getCarView('a').status, 'busy');
+  store.updateRideStatus(ride.id, 'cancelled', DISPATCHER);
+  assert.equal(store.getCarView('a').status, 'free');
+
+  const { token } = store.createDriverSession('a', '1111');
+  store.endDriverSession(token);
+  assert.equal(store.getCarView('a').status, 'offline');
+  assert.equal(store.authenticateDriverToken(token), null);
+});
+
+test('aplicația șoferului află și de cursa abia anulată', () => {
+  const { store, clock } = setup();
+  store.driverHeartbeat('a');
+  assert.equal(store.driverRide('a'), null);
+  const { ride } = newRide(store);
+  assert.equal(store.driverRide('a').status, 'assigned');
+  store.updateRideStatus(ride.id, 'cancelled', DISPATCHER);
+  assert.equal(store.driverRide('a').status, 'cancelled');
+  assert.equal(store.driverRide('a').id, ride.id);
+  clock.advance(11 * 60 * 1000);
+  assert.equal(store.driverRide('a'), null);
+  assert.equal(store.driverRide('nu-exista'), null);
+});

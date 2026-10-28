@@ -9,7 +9,7 @@ Aplicație web pentru o firmă de taxi. Arată pe hartă, în timp real, unde se
 | **Flotă** | `/fleet` | administratori | Adaugă și modifică mașini și șoferi, schimbă PIN-uri, dezactivează mașini. |
 | **Utilizatori** | `/users` | administratori | Conturile dispecerilor și administratorilor: adăugare, rol, resetare parolă, dezactivare. |
 | **Jurnal** | `/audit` | administratori | Cine ce a făcut și când: autentificări (inclusiv cele eșuate), curse create și anulate, modificări în flotă și conturi, exporturi. |
-| **Șofer** | `/driver` | șofer, pe telefon (mașină + PIN) | Trimite poziția GPS a telefonului, comută Liber / Ocupat, primește cursa cu sunet și vibrație, navigare cu Google Maps / Waze, butoane „Am ajuns”, „Client preluat”, „Cursă finalizată”. |
+| **Șofer** | `/driver` sau **aplicația Android** | șofer, pe telefon (mașină + PIN) | Trimite poziția GPS a telefonului, comută Liber / Ocupat, primește cursa cu sunet și vibrație, navigare cu Google Maps / Waze, butoane „Am ajuns”, „Client preluat”, „Cursă finalizată”. Aplicația Android transmite poziția **și cu ecranul stins** și anunță cursele noi prin notificări. |
 | **Client** | `/track/<cod>` | clientul (link primit prin SMS) | Vede mașina apropiindu-se pe hartă, distanța și timpul estimat, numărul de înmatriculare, modelul și prenumele șoferului. |
 
 Poziția trimisă de telefonul șoferului ajunge în mai puțin de o secundă la dispecerat și la client (WebSocket).
@@ -39,6 +39,58 @@ npm run simulate
 Mașinile demo circulă prin București pe străzi reale. Creați o cursă din tabul **+ Cursă nouă**, apoi deschideți linkul clientului. Mașina aleasă merge la client, îl preia și îl duce la destinație. Opțiuni: `-- --speed 3` (demo accelerat), `-- --cars 3` (doar 3 mașini), `-- --straight` (fără rutare pe străzi). Simulatorul folosește PIN-urile din `data/cars.json`.
 
 Pagina șoferului se poate testa pe același calculator la <http://localhost:3000/driver> (ex. mașina `B 101 TXI`, PIN `1111`). Browserul va cere permisiunea pentru locație.
+
+## Aplicația Android pentru șoferi
+
+Pagina `/driver` funcționează în orice browser, dar browserul oprește GPS-ul când ecranul se stinge sau șoferul deschide altă aplicație (ex. Waze). Aplicația Android din [`mobile/`](mobile) rezolvă asta:
+
+- **Transmite poziția și cu ecranul stins** sau din alte aplicații. Cât timp tura e activă, în bara de notificări apare „Tură activă · B 101 TXI”, așa cum cere Android pentru localizarea în fundal.
+- **Anunță cursele noi** (și anulările) printr-o notificare cu sunet, chiar dacă telefonul e în buzunar. Cu aplicația deschisă, cursa apare direct pe ecran.
+- **Are aceeași interfață** ca pagina web: aplicația conține pagina șoferului, deci orice îmbunătățire a ei ajunge în ambele.
+- **Păstrează doar un token de sesiune**, nu PIN-ul. Un PIN nou sau dezactivarea mașinii închide tura pe telefon.
+
+### Instalare pe telefoane
+
+1. **Descărcați APK-ul.** La fiecare modificare, GitHub Actions construiește aplicația: în repository, deschideți **Actions → CI → ultima rulare → Artifacts → `taxi-hyp-sofer-apk`**. Alternativ, construiți-l local (mai jos).
+2. **Instalați-l pe telefonul șoferului.** Copiați fișierul `.apk` pe telefon și deschideți-l. Android cere permisiunea de a instala aplicații din această sursă.
+3. **La prima pornire:**
+   - introduceți adresa serverului firmei (ex. `https://taxi.firma-mea.ro`; serverul trebuie să aibă HTTPS);
+   - alegeți mașina și introduceți PIN-ul;
+   - la **Începe tura**, permiteți **locația** („în timp ce folosiți aplicația” e suficient) și **notificările**.
+4. **Pe telefoanele Samsung, Xiaomi, Huawei și altele**, dezactivați „optimizarea bateriei” pentru aplicație (Setări → Aplicații → Taxi Hyp Șofer → Baterie → Nerestricționat). Altfel sistemul poate opri aplicația în timpul turei.
+
+### Construire locală
+
+Aveți nevoie de Node.js 22, JDK 21 și Android SDK (cel mai simplu prin [Android Studio](https://developer.android.com/studio)).
+
+```bash
+npm install
+```
+
+```bash
+cd mobile && npm install
+```
+
+```bash
+TAXI_SERVER_URL=https://taxi.firma-mea.ro npm run apk
+```
+
+APK-ul rezultă în `mobile/android/app/build/outputs/apk/debug/`. `TAXI_SERVER_URL` e opțional: dacă lipsește, adresa serverului se introduce în aplicație. Proiectul se poate deschide și în Android Studio (`npx cap open android`, din `mobile/`).
+
+### Versiunea pentru distribuire (semnată)
+
+APK-ul de test (debug) e semnat cu o cheie de dezvoltare. Pentru distribuire, creați o singură dată cheia firmei și **păstrați-o în siguranță**: actualizările aplicației trebuie semnate cu aceeași cheie.
+
+```bash
+keytool -genkeypair -v -keystore taxi-release.jks -alias taxi -keyalg RSA -keysize 2048 -validity 10000
+```
+
+- **Local:** creați `mobile/android/keystore.properties` (ignorat de git), cu `storeFile`, `storePassword`, `keyAlias`, `keyPassword`. Apoi rulați `npm run apk:release` din `mobile/`.
+- **În GitHub Actions:** adăugați secretele `TAXI_KEYSTORE_BASE64` (fișierul `.jks` codat cu `base64 -w0`), `TAXI_KEYSTORE_PASSWORD`, `TAXI_KEY_ALIAS` și `TAXI_KEY_PASSWORD`. APK-ul semnat apare atunci lângă cel de test. Adresa serverului se poate fixa cu variabila de repository `TAXI_SERVER_URL`.
+
+### Cum funcționează în fundal
+
+Android încetinește conexiunile paginii (WebView) după câteva minute în fundal. De aceea aplicația trimite poziția prin **HTTP nativ** (`POST /api/driver/location`), la 2 secunde în mers și cel puțin la 10 secunde pe loc. Răspunsul conține cursa curentă, astfel că o cursă nouă sau o anulare ajunge la șofer în cel mult ~10 secunde, chiar dacă WebSocket-ul e întrerupt. Pe server, mașina apare conectată cât timp a trimis ceva în ultimul minut.
 
 ## Conturi, roluri și jurnal
 
@@ -146,7 +198,7 @@ docker run -d --restart unless-stopped -p 3000:3000 -e ADMIN_PASSWORD='o-parola-
 npx cloudflared tunnel --url http://localhost:3000
 ```
 
-**Important pentru șoferi:** pagina trebuie să rămână deschisă pe ecran în timpul turei. Browserele de pe telefon opresc GPS-ul când pagina trece în fundal sau ecranul se stinge (aplicația cere ca ecranul să rămână aprins acolo unde browserul permite).
+**Important pentru șoferii care folosesc pagina web** (nu aplicația Android): pagina trebuie să rămână deschisă pe ecran în timpul turei. Browserele de pe telefon opresc GPS-ul când pagina trece în fundal sau ecranul se stinge (pagina cere ca ecranul să rămână aprins acolo unde browserul permite). Aplicația Android nu are această limitare.
 
 ## Cum funcționează
 
@@ -157,7 +209,7 @@ npx cloudflared tunnel --url http://localhost:3000
                          data/taxi.db  ◀── Istoric, Flotă, Utilizatori, Jurnal (API REST)
 ```
 
-- **Server**: Express + Socket.IO ([`src/app.js`](src/app.js)), API-ul REST în [`src/api.js`](src/api.js). Logica flotei și a curselor e în [`src/store.js`](src/store.js), conturile în [`src/accounts.js`](src/accounts.js), jurnalul în [`src/audit.js`](src/audit.js), iar baza de date în [`src/db.js`](src/db.js).
+- **Server**: Express + Socket.IO ([`src/app.js`](src/app.js)), API-ul REST în [`src/api.js`](src/api.js), API-ul aplicației șoferului în [`src/driver-api.js`](src/driver-api.js). Logica flotei și a curselor e în [`src/store.js`](src/store.js), conturile în [`src/accounts.js`](src/accounts.js), jurnalul în [`src/audit.js`](src/audit.js), iar baza de date în [`src/db.js`](src/db.js).
 - **Hărți**: [Leaflet](https://leafletjs.com) cu hărți [OpenStreetMap](https://www.openstreetmap.org), fără cheie API. Căutarea adreselor folosește [Nominatim](https://nominatim.org).
 - **Securitate**:
   - Parolele dispecerilor și PIN-urile șoferilor se păstrează doar ca hash scrypt.
@@ -177,12 +229,17 @@ Testele verifică:
 
 - logica flotei și a curselor, baza de date (inclusiv repornirea serverului în timpul unei curse), istoricul și statisticile;
 - conturile: autentificare, expirarea sesiunilor, parole temporare, roluri, protecția ultimului administrator;
-- un flux complet prin WebSocket și API: drepturi pe roluri, cereri respinse de pe alte site-uri, deconectarea la dezactivare și la ieșire, conținutul jurnalului.
+- un flux complet prin WebSocket și API: drepturi pe roluri, cereri respinse de pe alte site-uri, deconectarea la dezactivare și la ieșire, conținutul jurnalului;
+- API-ul aplicației șoferului: sesiuni cu token, poziția prin HTTP, cursa (și anularea ei) în răspuns, mașina „conectată” fără WebSocket.
+
+GitHub Actions rulează testele și construiește APK-ul la fiecare modificare ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)).
 
 ## Limitări actuale și pași următori
 
 - **Autentificare în doi pași (2FA)** pentru administratori nu există încă.
 - **Un singur server.** SQLite e potrivit pentru o firmă cu zeci de mașini pe un server. Pentru mai multe servere în paralel ar fi nevoie de PostgreSQL și de un adaptor Socket.IO (ex. Redis).
-- **GPS în fundal:** o aplicație mobilă nativă (sau un wrapper ca Capacitor) ar transmite poziția și cu ecranul stins.
+- **iPhone:** aplicația există doar pentru Android. Pentru iOS e nevoie de un Mac cu Xcode și de un cont Apple Developer: `npx cap add ios` în `mobile/`, plus cheile de localizare în fundal din `Info.plist` (vezi documentația pluginului `@capacitor-community/background-geolocation`). Până atunci, pe iPhone se folosește pagina `/driver`.
+- **Fără notificări push:** cursele noi ajung în aplicație odată cu trimiterea poziției, deci doar cât timp tura e activă. Pentru anunțuri și cu tura oprită ar fi nevoie de Firebase Cloud Messaging.
+- **Hărțile OpenStreetMap în aplicație:** serverele gratuite de hărți pot limita cererile venite din aplicații. Harta e secundară pentru șofer (navigarea se face cu Google Maps / Waze); la nevoie folosiți un furnizor de hărți propriu.
 - **Timpul estimat** se calculează din distanța în linie dreaptă, cu un factor pentru străzi. Pentru precizie mai mare se poate folosi un serviciu de rutare (OSRM, Google, Mapbox).
 - **Serviciile OpenStreetMap gratuite** (hărți, Nominatim, rutarea din simulator) au limite de utilizare echitabilă. La trafic mare folosiți un furnizor comercial sau propriul server de hărți.

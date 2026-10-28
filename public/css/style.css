@@ -405,6 +405,12 @@ button, input, select, textarea { font: inherit; color: inherit; }
   50% { box-shadow: 0 0 0 6px rgba(255, 199, 44, 0.6); }
 }
 
+/* Elemente afișate doar în aplicația Android (mobile/). */
+.native-only { display: none; }
+.native-app .native-only { display: block; }
+.server-line { margin: 14px 0 0; text-align: center; }
+.link-button { background: none; border: none; padding: 0; color: #1d4ed8; text-decoration: underline; cursor: pointer; font: inherit; }
+
 /* ---------- Pagina clientului ---------- */
 
 .track { display: flex; flex-direction: column; height: 100%; }

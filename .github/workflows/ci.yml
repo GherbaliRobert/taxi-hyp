@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      server_url:
+        description: 'Adresa serverului completată din start în aplicație (https://...). Gol = se introduce în aplicație.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Teste server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+
+  android:
+    name: Aplicația Android (APK)
+    runs-on: ubuntu-latest
+    env:
+      # Semnarea pentru distribuire e opțională: se activează când secretele există în repository.
+      HAS_KEYSTORE: ${{ secrets.TAXI_KEYSTORE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            mobile/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Dependențe
+        run: |
+          npm ci
+          npm ci --prefix mobile
+
+      - name: Conținutul aplicației
+        working-directory: mobile
+        env:
+          TAXI_SERVER_URL: ${{ inputs.server_url || vars.TAXI_SERVER_URL }}
+        run: npm run sync
+
+      - name: Cheia de semnare
+        if: env.HAS_KEYSTORE == 'true'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.TAXI_KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/taxi-release.jks"
+          echo "TAXI_KEYSTORE_FILE=$RUNNER_TEMP/taxi-release.jks" >> "$GITHUB_ENV"
+
+      - name: Construire APK
+        working-directory: mobile/android
+        env:
+          TAXI_KEYSTORE_PASSWORD: ${{ secrets.TAXI_KEYSTORE_PASSWORD }}
+          TAXI_KEY_ALIAS: ${{ secrets.TAXI_KEY_ALIAS }}
+          TAXI_KEY_PASSWORD: ${{ secrets.TAXI_KEY_PASSWORD }}
+        run: |
+          ./gradlew assembleDebug
+          if [ "$HAS_KEYSTORE" = "true" ]; then ./gradlew assembleRelease; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: taxi-hyp-sofer-apk
+          path: mobile/android/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error

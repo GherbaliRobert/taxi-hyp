@@ -10,6 +10,19 @@
 </head>
 <body>
   <div id="login" class="login" hidden>
+    <!-- Doar în aplicația de telefon: adresa serverului firmei. -->
+    <form class="login-card" id="server-form" hidden>
+      <div class="brand"><div class="brand-logo">TX</div><span>Taxi</span></div>
+      <h1>Aplicația șoferului</h1>
+      <p class="hint">Introduceți adresa serverului firmei (o primiți de la dispecerat).</p>
+      <div class="field">
+        <label for="server-url">Adresa serverului</label>
+        <input class="input" id="server-url" type="url" inputmode="url" autocapitalize="none" spellcheck="false" placeholder="https://taxi.firma-mea.ro" required>
+      </div>
+      <p class="error-text" id="server-error"></p>
+      <button class="btn btn-primary btn-block" type="submit">Continuă</button>
+    </form>
+
     <form class="login-card" id="login-form">
       <div class="brand"><div class="brand-logo">TX</div><span class="company-name">Taxi</span></div>
       <h1>Aplicația șoferului</h1>
@@ -23,7 +36,8 @@
         <input class="input" id="pin" type="password" inputmode="numeric" autocomplete="current-password" required>
       </div>
       <p class="error-text" id="login-error"></p>
-      <button class="btn btn-primary btn-block" type="submit">Intră în tură</button>
+      <button class="btn btn-primary btn-block" type="submit">Intră</button>
+      <p class="hint native-only server-line">Server: <span id="server-name"></span> · <button class="link-button" id="change-server" type="button">schimbă</button></p>
     </form>
   </div>
 
@@ -43,7 +57,8 @@
         </div>
         <p class="error-text collapse" id="gps-error"></p>
         <button class="btn btn-lg btn-primary" id="gps-toggle" type="button">Pornește GPS</button>
-        <p class="hint" style="margin-bottom:0">Păstrați pagina deschisă pe ecran cât sunteți în tură, ca dispeceratul și clienții să vă vadă poziția.</p>
+        <p class="hint" id="gps-hint" style="margin-bottom:0">Păstrați pagina deschisă pe ecran cât sunteți în tură, ca dispeceratul și clienții să vă vadă poziția.</p>
+        <p class="hint native-only" style="margin-bottom:0">Pe unele telefoane (Samsung, Xiaomi, Huawei), dezactivați „optimizarea bateriei” pentru această aplicație, altfel sistemul o poate opri în timpul turei.</p>
       </section>
 
       <section class="card ride-card" id="ride-card" hidden></section>

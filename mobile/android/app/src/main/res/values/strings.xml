@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Taxi Hyp Șofer</string>
+    <string name="title_activity_main">Taxi Hyp Șofer</string>
+    <string name="package_name">ro.taxihyp.driver</string>
+    <string name="custom_url_scheme">ro.taxihyp.driver</string>
+
+    <!-- Notificarea permanentă cât timp tura e activă (pluginul de GPS în fundal). -->
+    <string name="capacitor_background_geolocation_notification_channel_name">Tura activă</string>
+    <string name="capacitor_background_geolocation_notification_icon">drawable/ic_stat_taxi</string>
+    <string name="capacitor_background_geolocation_notification_color">#FFC72C</string>
+</resources>

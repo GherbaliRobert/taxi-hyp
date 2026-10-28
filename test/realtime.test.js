@@ -412,6 +412,69 @@ test('jurnalul arată cine ce a făcut', async () => {
   assert.equal((await api(`/api/audit?from=${Date.now() + 60000}`, { cookie: adminCookie })).body.total, 0);
 });
 
+function driverApi(path, { method = 'POST', body, token } = {}) {
+  const headers = { 'content-type': 'application/json' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  return fetch(baseUrl + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }).then(
+    async (res) => ({ status: res.status, body: await res.json().catch(() => null) })
+  );
+}
+
+test('aplicația șoferului: token, poziție prin HTTP și cursa în răspuns', async () => {
+  assert.equal((await driverApi('/api/driver/login', { body: { carId: 'b', pin: '0000' } })).status, 401);
+  assert.equal((await driverApi('/api/driver/location', { body: { lat: 44.4, lng: 26.1 } })).status, 401);
+  assert.equal((await driverApi('/api/driver/location', { token: 'fals', body: { lat: 44.4, lng: 26.1 } })).status, 401);
+
+  const login = await driverApi('/api/driver/login', { body: { carId: 'b', pin: '2222', device: 'test' } });
+  assert.equal(login.status, 200);
+  assert.equal(login.body.car.plate, 'B 02 BBB');
+  const { token } = login.body;
+
+  // Prima poziție trimisă prin HTTP face mașina „liberă” în dispecerat, fără WebSocket.
+  const dispatcher = dispatcherClient(mariaCookie);
+  await waitFor(dispatcher, 'fleet:snapshot');
+  const online = waitFor(dispatcher, 'car:update', (c) => c.id === 'b' && c.status === 'free' && c.position && c.position.lat === 44.41);
+  const first = await driverApi('/api/driver/location', { token, body: { lat: 44.41, lng: 26.1, accuracy: 8, speed: 0 } });
+  assert.equal(first.status, 200);
+  // Fără cursă activă (poate apărea doar ultima cursă, anulată în testul anterior).
+  assert.equal(first.body.car.rideId, null);
+  assert.ok(first.body.ride === null || first.body.ride.status === 'cancelled');
+  assert.equal(first.body.car.status, 'free');
+  await online;
+  assert.equal((await driverApi('/api/driver/location', { token, body: { lat: 999, lng: 0 } })).status, 400);
+
+  // Dispecerul trimite o cursă; aplicația o află din răspunsul următor (chiar fiind în fundal).
+  const created = await dispatcher.emitWithAck('ride:create', { customerName: 'Elena', phone: '0733', pickup: { lat: 44.42, lng: 26.1 }, carId: 'b' });
+  assert.equal(created.ok, true, created.error);
+  await new Promise((r) => setTimeout(r, 550));
+  const next = await driverApi('/api/driver/location', { token, body: { lat: 44.412, lng: 26.1 } });
+  assert.equal(next.body.ride.id, created.ride.id);
+  assert.equal(next.body.ride.status, 'assigned');
+  assert.equal(next.body.ride.customerName, 'Elena');
+  assert.equal('trackPath' in next.body.ride, false);
+  assert.equal((await driverApi('/api/driver/state', { method: 'GET', token })).body.ride.id, created.ride.id);
+
+  // Cu același token se conectează și WebSocket-ul (cursele live când aplicația e deschisă).
+  const socket = client({ role: 'driver', token });
+  const init = await waitFor(socket, 'driver:init');
+  assert.equal(init.ride.id, created.ride.id);
+  assert.equal((await socket.emitWithAck('ride:status', { rideId: created.ride.id, status: 'arrived' })).ok, true);
+  assert.equal(await connectError({ role: 'driver', token: 'fals' }), 'unauthorized');
+  await dispatcher.emitWithAck('ride:status', { rideId: created.ride.id, status: 'cancelled' });
+  // Din fundal (fără WebSocket), aplicația află anularea din răspunsul următor.
+  await new Promise((r) => setTimeout(r, 550));
+  const afterCancel = await driverApi('/api/driver/location', { token, body: { lat: 44.413, lng: 26.1 } });
+  assert.deepEqual([afterCancel.body.ride.id, afterCancel.body.ride.status], [created.ride.id, 'cancelled']);
+  assert.equal(afterCancel.body.car.rideId, null);
+
+  // Ieșirea: tokenul nu mai e valid, mașina apare deconectată după închiderea WebSocket-ului.
+  const offline = waitFor(dispatcher, 'car:update', (c) => c.id === 'b' && c.status === 'offline');
+  assert.equal((await driverApi('/api/driver/logout', { token })).status, 200);
+  socket.disconnect();
+  await offline;
+  assert.equal((await driverApi('/api/driver/location', { token, body: { lat: 44.41, lng: 26.1 } })).status, 401);
+});
+
 test('după prea multe încercări greșite, IP-ul este blocat temporar', async () => {
   const other = createApp(CONFIG);
   await new Promise((resolve) => other.httpServer.listen(0, '127.0.0.1', resolve));

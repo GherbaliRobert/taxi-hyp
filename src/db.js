@@ -100,6 +100,18 @@ const MIGRATIONS = [
   ALTER TABLE rides ADD COLUMN created_by_name TEXT NOT NULL DEFAULT '';
   ALTER TABLE rides ADD COLUMN closed_by_name TEXT NOT NULL DEFAULT '';
   `,
+  `
+  -- Sesiunile șoferilor (aplicația de telefon și pagina web): tokenul se păstrează doar ca hash.
+  CREATE TABLE driver_sessions (
+    token_hash TEXT PRIMARY KEY,
+    car_id TEXT NOT NULL REFERENCES cars (id),
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    device TEXT NOT NULL DEFAULT ''
+  );
+  CREATE INDEX driver_sessions_car ON driver_sessions (car_id);
+  CREATE INDEX rides_car ON rides (car_id, created_at);
+  `,
 ];
 
 function openDatabase(file) {
@@ -283,6 +295,7 @@ function createRepository(db) {
     ),
     rideById: db.prepare('SELECT * FROM rides WHERE id = ?'),
     rideByToken: db.prepare('SELECT * FROM rides WHERE token = ?'),
+    latestRideForCar: db.prepare('SELECT * FROM rides WHERE car_id = ? ORDER BY created_at DESC, id DESC LIMIT 1'),
     recentFinished: db.prepare(
       `SELECT * FROM rides WHERE status IN ('completed', 'cancelled') AND finished_at >= ?
        ORDER BY finished_at DESC LIMIT ?`
@@ -314,6 +327,15 @@ function createRepository(db) {
     deleteUserSessions: db.prepare('DELETE FROM sessions WHERE user_id = ? AND token_hash != ?'),
     pruneSessions: db.prepare('DELETE FROM sessions WHERE last_seen_at < ? OR created_at < ?'),
     sessionCounts: db.prepare('SELECT user_id AS userId, COUNT(*) AS n FROM sessions WHERE last_seen_at >= ? GROUP BY user_id'),
+    insertDriverSession: db.prepare(
+      `INSERT INTO driver_sessions (token_hash, car_id, created_at, last_seen_at, device)
+       VALUES (@tokenHash, @carId, @createdAt, @lastSeenAt, @device)`
+    ),
+    driverSession: db.prepare('SELECT * FROM driver_sessions WHERE token_hash = ?'),
+    touchDriverSession: db.prepare('UPDATE driver_sessions SET last_seen_at = ? WHERE token_hash = ?'),
+    deleteDriverSession: db.prepare('DELETE FROM driver_sessions WHERE token_hash = ?'),
+    deleteCarDriverSessions: db.prepare('DELETE FROM driver_sessions WHERE car_id = ?'),
+    pruneDriverSessions: db.prepare('DELETE FROM driver_sessions WHERE last_seen_at < ?'),
     insertAudit: db.prepare(
       `INSERT INTO audit_log (ts, user_id, user_name, action, target, summary, ip)
        VALUES (@ts, @userId, @userName, @action, @target, @summary, @ip)`
@@ -349,6 +371,10 @@ function createRepository(db) {
       return row ? rowToRide(row) : null;
     },
     recentFinished: (since, limit) => st.recentFinished.all(since, limit).map(rowToRide),
+    latestRideForCar(carId) {
+      const row = st.latestRideForCar.get(carId);
+      return row ? rowToRide(row) : null;
+    },
     ridePoints: (id) => st.ridePoints.all(Number(id)),
     pruneRidePoints: (before) => st.prunePoints.run(before).changes,
 
@@ -435,6 +461,15 @@ function createRepository(db) {
     deleteUserSessions: (userId, exceptTokenHash = '') => st.deleteUserSessions.run(userId, exceptTokenHash),
     pruneSessions: (idleBefore, createdBefore) => st.pruneSessions.run(idleBefore, createdBefore).changes,
     sessionCounts: (since) => new Map(st.sessionCounts.all(since).map((r) => [r.userId, r.n])),
+
+    // ---- Sesiunile șoferilor ----
+
+    insertDriverSession: (session) => st.insertDriverSession.run(session),
+    driverSession: (tokenHash) => st.driverSession.get(tokenHash) || null,
+    touchDriverSession: (tokenHash, ts) => st.touchDriverSession.run(ts, tokenHash),
+    deleteDriverSession: (tokenHash) => st.deleteDriverSession.run(tokenHash),
+    deleteCarDriverSessions: (carId) => st.deleteCarDriverSessions.run(carId),
+    pruneDriverSessions: (before) => st.pruneDriverSessions.run(before).changes,
 
     // ---- Jurnal ----
 

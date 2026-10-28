@@ -8,6 +8,7 @@ const { FleetStore, importCars } = require('./store');
 const { Accounts } = require('./accounts');
 const { createAuditLog, rideSummary } = require('./audit');
 const { createApi, sessionToken, sameOrigin, hostnameOf } = require('./api');
+const { createDriverApi } = require('./driver-api');
 const { rideViewForDispatcher, rideViewForDriver } = require('./views');
 const { loadCars } = require('./config');
 
@@ -20,6 +21,7 @@ const AUTH_WINDOW_MS = 10 * 60 * 1000;
 const AUTH_MAX_FAILURES = 20;
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
+const PRESENCE_SWEEP_MS = 15 * 1000;
 const PAGES = ['driver', 'history', 'fleet', 'users', 'audit'];
 const RIDE_STATUS_ACTIONS = { cancelled: 'ride_cancel', completed: 'ride_complete' };
 
@@ -78,10 +80,14 @@ function createApp(config) {
   const maintenance = () => {
     store.pruneRoutes(config.routeRetentionDays || 180);
     accounts.pruneSessions();
+    store.pruneDriverSessions();
   };
   maintenance();
   const maintenanceTimer = setInterval(maintenance, DAY_MS);
   maintenanceTimer.unref();
+  // Mașinile din aplicație care nu mai trimit poziția apar „deconectate” după un minut.
+  const presenceTimer = setInterval(() => store.sweepPresence(), PRESENCE_SWEEP_MS);
+  presenceTimer.unref();
 
   const app = express();
   app.disable('x-powered-by');
@@ -104,6 +110,7 @@ function createApp(config) {
     })
   );
   app.get('/api/cars', (req, res) => res.json(store.carDirectory()));
+  app.use('/api/driver', createDriverApi({ store, limiter }));
   app.use('/api', createApi({ store, accounts, audit, limiter, config }));
 
   for (const page of PAGES) {
@@ -155,6 +162,14 @@ function createApp(config) {
       if (!user) return next(new Error('unauthorized'));
       if (user.mustChangePassword) return next(new Error('password_change_required'));
       socket.data = { role: 'dispatcher', user };
+      return next();
+    }
+
+    // Șoferul: token de sesiune (aplicația și pagina web) sau, pentru simulator, mașină + PIN.
+    if (auth.role === 'driver' && auth.token) {
+      const carId = store.authenticateDriverToken(auth.token);
+      if (!carId) return next(new Error('unauthorized'));
+      socket.data = { role: 'driver', carId };
       return next();
     }
 
@@ -277,6 +292,7 @@ function createApp(config) {
 
   async function close() {
     clearInterval(maintenanceTimer);
+    clearInterval(presenceTimer);
     io.close();
     if (httpServer.listening) await new Promise((resolve) => httpServer.close(resolve));
     db.close();

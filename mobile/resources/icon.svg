@@ -1,0 +1,8 @@
+<!-- Sursa iconiței aplicației (taxi pe galben). Iconițele Android sunt generate din ea. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 108 108" width="1024" height="1024">
+  <rect width="108" height="108" fill="#FFC72C"/>
+  <g transform="translate(18 23.1) scale(3)" fill="#17191D">
+    <path d="M5 11l1.5-4.5A2 2 0 0 1 8.4 5h7.2a2 2 0 0 1 1.9 1.5L19 11v6a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1v-1H8v1a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1v-6zm2.2 0h9.6l-1-3.2a.5.5 0 0 0-.5-.3H8.7a.5.5 0 0 0-.5.3L7.2 11zM7.5 14.5a1.2 1.2 0 1 0 0-2.4 1.2 1.2 0 0 0 0 2.4zm9 0a1.2 1.2 0 1 0 0-2.4 1.2 1.2 0 0 0 0 2.4z"/>
+    <path d="M9.5 2.6h5a0.5 0.5 0 0 1 0.5 0.5v1a0.5 0.5 0 0 1 -0.5 0.5h-5a0.5 0.5 0 0 1 -0.5 -0.5v-1a0.5 0.5 0 0 1 0.5 -0.5z"/>
+  </g>
+</svg>

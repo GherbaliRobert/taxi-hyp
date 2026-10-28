@@ -1,0 +1,14 @@
+{
+  "appId": "ro.taxihyp.driver",
+  "appName": "Taxi Hyp Șofer",
+  "webDir": "www",
+  "android": {
+    "useLegacyBridge": true
+  },
+  "plugins": {
+    "LocalNotifications": {
+      "smallIcon": "ic_stat_taxi",
+      "iconColor": "#FFC72C"
+    }
+  }
+}
