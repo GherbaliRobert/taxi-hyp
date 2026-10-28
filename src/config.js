@@ -50,6 +50,31 @@ function loadSmsConfig(env) {
   return sms;
 }
 
+function httpUrl(name, value) {
+  if (!value) return '';
+  if (!/^https?:\/\/[^/\s]+/.test(value)) throw new Error(`${name} trebuie să fie o adresă http(s), ex. http://127.0.0.1:8080/inference`);
+  return value.replace(/\/+$/, '');
+}
+
+/**
+ * Asistentul vocal al dispecerului (opțional): AI-ul rulează pe calculatorul dispecerului, iar pagina
+ * îl apelează direct, deci adresele sunt văzute din browserul dispecerului (de obicei 127.0.0.1).
+ */
+function loadVoiceConfig(env) {
+  const sttUrl = httpUrl('VOICE_STT_URL', env.VOICE_STT_URL);
+  if (!sttUrl) return null;
+  const llmUrl = httpUrl('VOICE_LLM_URL', env.VOICE_LLM_URL);
+  return {
+    // Recunoașterea vocii: whisper.cpp (…/inference) sau un server compatibil OpenAI (…/v1/audio/transcriptions).
+    sttUrl,
+    sttModel: env.VOICE_STT_MODEL || '',
+    language: env.VOICE_LANGUAGE || 'ro',
+    // Opțional: un model AI local (Ollama) care completează ce nu prind regulile (ex. „la Gara de Nord”).
+    llmUrl,
+    llmModel: llmUrl ? env.VOICE_LLM_MODEL || 'qwen2.5:7b' : '',
+  };
+}
+
 function loadConfig(env = process.env) {
   const production = env.NODE_ENV === 'production';
   // Parola contului „admin”, folosită o singură dată: la prima pornire, când nu există niciun cont.
@@ -85,7 +110,8 @@ function loadConfig(env = process.env) {
     // Câte secunde are un șofer să accepte o comandă.
     offerTimeoutSeconds: number(env.OFFER_TIMEOUT_SECONDS, 60),
     sms: loadSmsConfig(env),
+    voice: loadVoiceConfig(env),
   };
 }
 
-module.exports = { loadConfig, loadCars, loadSmsConfig };
+module.exports = { loadConfig, loadCars, loadSmsConfig, loadVoiceConfig };

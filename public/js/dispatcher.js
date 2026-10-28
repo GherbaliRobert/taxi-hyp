@@ -31,6 +31,13 @@
   let pickup = null;
   let draftMarker = null;
   let addressWasAutoFilled = false;
+  // Locul de preluare ales de dispecer pe hartă (asistentul vocal nu îl mai mută).
+  let pickupFromMap = false;
+
+  // Asistentul vocal: câmpurile scrise de mână de dispecer nu mai sunt completate automat.
+  let voice = null;
+  const typedFields = new Set();
+  let voiceSearchTimer = null;
 
   let mapVisible = false;
 
@@ -48,7 +55,8 @@
       tab.addEventListener('click', () => setTab(tab.dataset.tab))
     );
     $('ride-form').addEventListener('submit', submitRide);
-    $('geocode').addEventListener('click', searchAddress);
+    $('geocode').addEventListener('click', () => searchAddress());
+    setupVoice();
     $('ride-address').addEventListener('input', () => (addressWasAutoFilled = false));
     $('ride-address').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
@@ -73,7 +81,9 @@
     // Harta se creează înainte de conectare, ca primele mașini primite să aibă unde apărea.
     map = UI.createMap($('map'), config);
     map.on('click', (e) => {
-      if (activeTab === 'new') setPickup(e.latlng.lat, e.latlng.lng, true);
+      if (activeTab !== 'new') return;
+      pickupFromMap = true;
+      setPickup(e.latlng.lat, e.latlng.lng, true);
     });
     await connect();
   }
@@ -596,6 +606,7 @@
       draftMarker = L.marker([pickup.lat, pickup.lng], { icon: UI.pickupIcon(), draggable: true, zIndexOffset: 1000 }).addTo(map);
       draftMarker.on('dragend', () => {
         const p = draftMarker.getLatLng();
+        pickupFromMap = true;
         setPickup(p.lat, p.lng, true);
       });
     } else {
@@ -684,7 +695,9 @@
   function resetForm() {
     $('ride-form').reset();
     pickup = null;
+    pickupFromMap = false;
     addressWasAutoFilled = false;
+    resetVoice();
     if (draftMarker) {
       draftMarker.remove();
       draftMarker = null;
@@ -734,7 +747,8 @@
 
   // ---------- Căutare adrese (OpenStreetMap Nominatim) ----------
 
-  async function searchAddress() {
+  /** `quiet`: căutare pornită de asistentul vocal; dacă nu găsește, dispecerul vede doar că pinul lipsește. */
+  async function searchAddress({ quiet = false } = {}) {
     const query = $('ride-address').value.trim();
     if (!query) return;
     const button = $('geocode');
@@ -752,7 +766,7 @@
       const res = await fetch(NOMINATIM + '/search?' + params);
       const results = res.ok ? await res.json() : [];
       if (!results.length) {
-        UI.toast('Adresa nu a fost găsită. Alegeți punctul direct pe hartă.', 'error');
+        if (!quiet) UI.toast('Adresa nu a fost găsită. Alegeți punctul direct pe hartă.', 'error');
         return;
       }
       const lat = Number(results[0].lat);
@@ -760,7 +774,7 @@
       setPickup(lat, lng, false);
       map.setView([lat, lng], 17);
     } catch {
-      UI.toast('Căutarea adreselor nu este disponibilă. Alegeți punctul pe hartă.', 'error');
+      if (!quiet) UI.toast('Căutarea adreselor nu este disponibilă. Alegeți punctul pe hartă.', 'error');
     } finally {
       button.disabled = false;
     }
@@ -786,6 +800,94 @@
     } catch {
       // Adresa e opțională; punctul de pe hartă este suficient.
     }
+  }
+
+  // ---------- Asistentul vocal (opțional, AI local pe calculatorul dispecerului) ----------
+
+  function setupVoice() {
+    if (!config.voice || !window.TaxiVoice) return;
+    $('voice-box').hidden = false;
+    $('voice-toggle').addEventListener('click', () => (voice && voice.active ? voice.stop() : startVoice()));
+    for (const id of ['ride-address', 'ride-name', 'ride-phone', 'ride-notes']) {
+      $(id).addEventListener('input', () => typedFields.add(id));
+    }
+  }
+
+  async function startVoice() {
+    if (voice) voice.stop({ discard: true });
+    $('voice-error').textContent = '';
+    voice = TaxiVoice.createVoiceAssistant(config.voice, {
+      onStatus: renderVoiceStatus,
+      onTranscript: renderTranscript,
+      onFields: applyVoiceFields,
+      onError: (message) => ($('voice-error').textContent = message),
+    });
+    try {
+      await voice.start();
+    } catch (err) {
+      $('voice-error').textContent = err.message;
+      voice = null;
+      renderVoiceStatus({ listening: false, pending: 0, level: 0 });
+    }
+  }
+
+  /** Comanda a fost trimisă: ascultarea se oprește, iar frazele încă în lucru nu mai completează formularul. */
+  function resetVoice() {
+    if (voice) voice.stop({ discard: true });
+    voice = null;
+    typedFields.clear();
+    clearTimeout(voiceSearchTimer);
+    $('voice-error').textContent = '';
+    $('voice-transcript').replaceChildren();
+    $('voice-transcript').hidden = true;
+    renderVoiceStatus({ listening: false, pending: 0, level: 0 });
+  }
+
+  function renderVoiceStatus({ listening, hearing, pending, level }) {
+    const toggle = $('voice-toggle');
+    toggle.textContent = listening ? 'Oprește ascultarea' : 'Ascultă convorbirea';
+    toggle.classList.toggle('recording', listening);
+    $('voice-status').textContent = listening
+      ? hearing
+        ? 'Aud vorbire…'
+        : pending
+          ? 'Recunosc ce s-a spus…'
+          : 'Ascult convorbirea'
+      : pending
+        ? 'Recunosc ultimele fraze…'
+        : 'Completează comanda din ce se spune la telefon.';
+    $('voice-level').style.width = listening ? Math.min(100, Math.round(level * 400)) + '%' : '0';
+  }
+
+  function renderTranscript(lines) {
+    const box = $('voice-transcript');
+    box.hidden = false;
+    box.replaceChildren(...lines.map((line) => el('p', {}, line)));
+    box.scrollTop = box.scrollHeight;
+  }
+
+  /** Completează câmpurile încă neatinse de dispecer; adresa nouă este căutată pe hartă. */
+  function applyVoiceFields(fields) {
+    fill('ride-name', fields.customerName);
+    fill('ride-phone', fields.phone);
+    fill('ride-notes', fields.details);
+    if (fill('ride-address', fields.address)) {
+      addressWasAutoFilled = false;
+      if (!pickupFromMap) {
+        clearTimeout(voiceSearchTimer);
+        voiceSearchTimer = setTimeout(() => searchAddress({ quiet: true }), 400);
+      }
+    }
+  }
+
+  function fill(id, value) {
+    const input = $(id);
+    if (!value || typedFields.has(id) || input.value === value) return false;
+    input.value = value;
+    input.classList.remove('autofilled');
+    void input.offsetWidth; // repornește animația
+    input.classList.add('autofilled');
+    return true;
   }
 
   // ---------- Utilitare ----------

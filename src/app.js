@@ -144,6 +144,7 @@ function createApp(config) {
       mapCenter: config.mapCenter,
       mapZoom: config.mapZoom,
       geocodeCountry: config.geocodeCountry,
+      voice: config.voice || null,
     })
   );
   app.get('/api/cars', (req, res) => res.json(store.carDirectory()));

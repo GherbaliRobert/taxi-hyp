@@ -103,6 +103,7 @@ test('paginile și API-ul public', async () => {
   const config = await (await fetch(`${baseUrl}/api/config`)).json();
   assert.equal(config.companyName, 'Test Taxi');
   assert.ok(!JSON.stringify(config).includes('secret'));
+  assert.equal(config.voice, null); // asistentul vocal e opțional
 
   for (const page of ['/', '/driver', '/history', '/fleet', '/users', '/audit', '/track/oricare', '/vendor/leaflet/leaflet.js', '/js/common.js']) {
     const res = await fetch(baseUrl + page);

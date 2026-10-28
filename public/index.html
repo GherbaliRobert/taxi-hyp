@@ -50,6 +50,15 @@
 
         <section class="panel" id="panel-new" hidden>
           <form id="ride-form" novalidate>
+            <div class="voice-box" id="voice-box" hidden>
+              <div class="row">
+                <button class="btn" id="voice-toggle" type="button">Ascultă convorbirea</button>
+                <span class="hint grow" id="voice-status">Completează comanda din ce se spune la telefon.</span>
+              </div>
+              <div class="voice-level" aria-hidden="true"><span id="voice-level"></span></div>
+              <p class="error-text collapse" id="voice-error"></p>
+              <div class="voice-transcript" id="voice-transcript" aria-live="polite" hidden></div>
+            </div>
             <div class="field">
               <label for="ride-address">Adresa de preluare</label>
               <div class="row">
@@ -91,7 +100,9 @@
   <script src="/vendor/leaflet/leaflet.js"></script>
   <script src="/socket.io/socket.io.js"></script>
   <script src="/shared/geo.js"></script>
+  <script src="/shared/order-text.js"></script>
   <script src="/js/common.js"></script>
+  <script src="/js/voice.js"></script>
   <script src="/js/dispatcher.js"></script>
 </body>
 </html>

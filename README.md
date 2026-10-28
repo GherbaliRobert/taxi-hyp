@@ -4,7 +4,7 @@ Aplicație web pentru o firmă de taxi. Arată pe hartă, în timp real, unde se
 
 | Pagina | Adresa | Pentru cine | Ce face |
 | --- | --- | --- | --- |
-| **Hartă** | `/` | dispeceri | Toate mașinile pe hartă, actualizate live (liber / ocupat / deconectat, direcție, viteză, traseu recent). Preia comenzile: adresa (căutare sau click pe hartă), clientul, telefonul; comanda pleacă la toți șoferii liberi, la cei mai apropiați sau la o anumită mașină. Arată cine a acceptat sau a refuzat și dacă SMS-ul a ajuns la client. |
+| **Hartă** | `/` | dispeceri | Toate mașinile pe hartă, actualizate live (liber / ocupat / deconectat, direcție, viteză, traseu recent). Preia comenzile: adresa (căutare sau click pe hartă), clientul, telefonul (opțional completate automat din convorbire, de un [asistent vocal cu AI local](#asistent-vocal-comanda-completată-din-convorbire-ai-local)); comanda pleacă la toți șoferii liberi, la cei mai apropiați sau la o anumită mașină. Arată cine a acceptat sau a refuzat și dacă SMS-ul a ajuns la client. |
 | **Istoric** | `/history` | dispeceri | Cursele pe orice perioadă, cu filtre (mașină, status, client / telefon / adresă). Statistici: număr de curse, anulări, comenzi fără șofer, km cu clienți, timpul mediu până la acceptare, de așteptare și durata medie. Totaluri pe mașină și șofer, respectiv pe dispecer. Traseul GPS al fiecărei curse pe hartă. Export pentru Excel. |
 | **Flotă** | `/fleet` | administratori | Adaugă și modifică mașini și șoferi, schimbă PIN-uri, dezactivează mașini. |
 | **Utilizatori** | `/users` | administratori | Conturile dispecerilor și administratorilor: adăugare, rol, resetare parolă, dezactivare. |
@@ -180,6 +180,10 @@ Setările sunt variabile de mediu:
 | `OFFER_TIMEOUT_SECONDS` | `60` | Cât timp are șoferul să accepte comanda. |
 | `SMS_PROVIDER` | `console` | Cum se trimite SMS-ul clientului: `console` (doar în jurnalul serverului), `smsgate` sau `twilio`. Vezi mai jos. |
 | `SMS_COUNTRY_CODE` | `40` | Prefixul țării adăugat numerelor scrise local (`0722…` → `+40722…`). |
+| `VOICE_STT_URL` | — (asistent vocal oprit) | Adresa serverului de recunoaștere a vocii, **văzută de pe calculatorul dispecerului** (ex. `http://127.0.0.1:8080/inference`). Vezi [Asistent vocal](#asistent-vocal-comanda-completată-din-convorbire-ai-local). |
+| `VOICE_STT_MODEL` | — | Numele modelului, doar pentru serverele compatibile OpenAI care îl cer (whisper.cpp nu). |
+| `VOICE_LANGUAGE` | `ro` | Limba convorbirilor. |
+| `VOICE_LLM_URL`, `VOICE_LLM_MODEL` | —, `qwen2.5:7b` | Opțional: Ollama pe calculatorul dispecerului (ex. `http://127.0.0.1:11434`), pentru ce nu prind regulile. |
 | `TRUST_PROXY` | — | `1` dacă aplicația rulează în spatele unui reverse proxy (nginx, Caddy). |
 
 ## SMS către clienți
@@ -210,6 +214,62 @@ Cu serverul propriu SMS Gateway (sau modul „Local server” al aplicației), s
 | `TWILIO_MESSAGING_SERVICE_SID` | Alternativă la `TWILIO_FROM`: un Messaging Service din Twilio. |
 
 Dacă lipsesc datele necesare furnizorului ales, serverul nu pornește și spune ce variabilă lipsește.
+
+## Asistent vocal: comanda completată din convorbire (AI local)
+
+Cât timp dispecerul vorbește cu clientul, aplicația poate asculta convorbirea și completa singură formularul: adresa (căutată imediat pe hartă), numele, telefonul și observațiile (bloc, scară, bagaje). Dispecerul verifică și apasă **Trimite comanda**.
+
+**Totul rulează pe calculatorul dispecerului**, fără servicii plătite și fără costuri per apel. Sunetul nu pleacă spre serverul firmei sau spre internet și nu se păstrează nicăieri. Rămân doar datele comenzii trimise.
+
+Cum funcționează:
+
+1. În tabul **+ Cursă nouă**, dispecerul apasă **Ascultă convorbirea**. Browserul cere o dată acces la microfon.
+2. Pagina împarte vorbirea în fraze și le trimite la **Whisper**, un program gratuit de recunoaștere a vocii care rulează pe același calculator. Textul apare sub buton.
+3. Din text, aplicația scoate adresa („strada Ion Creangă numărul 12” devine „Strada Ion Creangă 12”), blocul și scara, numele (după „pe numele…” sau ca răspuns la „Pe ce nume?”) și telefonul.
+4. Opțional, un **model AI local** (Ollama) citește convorbirea și completează ce nu prind regulile, de exemplu „la Gara de Nord”.
+5. Câmpurile scrise de mână de dispecer nu sunt modificate. La trimiterea comenzii, ascultarea se oprește.
+
+**Ce se aude:** asistentul ascultă microfonul calculatorului. Cu căști, aude doar dispecerul, deci funcționează când dispecerul repetă adresa („Calea Victoriei 12, pe numele Ana Popescu, da?”), cum se face de obicei. Dacă telefonul e pe difuzor sau convorbirea se face din calculator, aude ambele voci.
+
+### Instalare pe calculatorul dispecerului
+
+**1. Whisper (obligatoriu)**, prin [whisper.cpp](https://github.com/ggml-org/whisper.cpp):
+
+- **Windows:** din pagina *Releases* a whisper.cpp descărcați arhiva pentru Windows (cea cu `cublas` în nume dacă aveți placă video NVIDIA) și dezarhivați-o.
+- **Linux:** compilați din sursă, conform instrucțiunilor whisper.cpp (`cmake -B build && cmake --build build --config Release`).
+- **Modelul**, de pe [huggingface.co/ggerganov/whisper.cpp](https://huggingface.co/ggerganov/whisper.cpp/tree/main):
+  - cu placă video NVIDIA: `ggml-large-v3-turbo.bin` (1,6 GB), cea mai bună recunoaștere a limbii române;
+  - doar cu procesor: `ggml-small.bin` (0,5 GB), rapid, dar greșește mai des; pe un procesor puternic încercați și `ggml-medium-q5_0.bin`.
+- **Pornire:**
+
+  ```bash
+  whisper-server -m ggml-small.bin -l ro --host 127.0.0.1 --port 8080
+  ```
+
+  Pe Windows, programul se numește `whisper-server.exe`. Lăsați-l pornit cât lucrează dispeceratul (ex. din *Pornire automată* în Windows).
+
+**2. Ollama (opțional)**, de pe [ollama.com](https://ollama.com):
+
+```bash
+ollama pull qwen2.5:7b
+```
+
+Ollama acceptă implicit doar cereri de la pagini deschise pe `localhost`. Dacă dispecerii lucrează pe adresa publică, setați pe calculator variabila de mediu `OLLAMA_ORIGINS` la adresa aplicației (ex. `https://taxi.firma-mea.ro`) și reporniți Ollama. Pe procesor, un model de 7B răspunde în câteva secunde; regulile completează formularul imediat, iar Ollama corectează apoi.
+
+**3. Pe server**, porniți aplicația cu:
+
+```bash
+VOICE_STT_URL=http://127.0.0.1:8080/inference VOICE_LLM_URL=http://127.0.0.1:11434 npm start
+```
+
+Adresele sunt cele **de pe calculatorul dispecerului** (pagina le apelează direct), nu de pe server. Folosiți `127.0.0.1`: dintr-o pagină HTTPS, browserul blochează adresele `http://` ale altor calculatoare din rețea. Așa, serverul aplicației poate fi oriunde (ex. un VPS), iar AI-ul rămâne în dispecerat. Fiecare calculator de dispecer are nevoie de Whisper-ul lui. Chrome poate cere o dată permisiunea de acces la rețeaua locală (pagina publică apelează `127.0.0.1`): alegeți **Permiteți**.
+
+Merge și cu alte servere compatibile cu API-ul OpenAI de transcriere (ex. `…/v1/audio/transcriptions`); pentru ele setați și `VOICE_STT_MODEL`.
+
+**Înainte de folosire:**
+
+- **Testați** pe câteva zeci de convorbiri reale. Recunoașterea greșește uneori numele de străzi, mai ales cu modelele mici, pe procesor. Pinul de pe hartă arată imediat dacă adresa a fost înțeleasă.
+- **GDPR:** clientul trebuie informat că apelul este procesat automat (ex. un mesaj la începutul apelului). Verificați formularea cu cine se ocupă de protecția datelor în firmă.
 
 ## Date și copii de siguranță
 
@@ -295,6 +355,7 @@ Testele verifică:
 - comenzile: trimiterea la mașinile libere / cele mai apropiate, primul care acceptă câștigă, refuzul, expirarea, retrimiterea, anularea, linkul valabil doar cât durează cursa;
 - GPS-ul obligatoriu: fără poziții recente (sau cu GPS-ul oprit de șofer) mașina nu primește și nu poate accepta comenzi, iar o poziție veche retrimisă nu contează;
 - SMS-ul: formatul numerelor, textul de maxim 160 de caractere, cererile către SMSGate și Twilio, erorile furnizorului;
+- asistentul vocal: extragerea adresei, numelui, telefonului și a detaliilor din convorbiri tipice de dispecerat;
 - conturile: autentificare, expirarea sesiunilor, parole temporare, roluri, protecția ultimului administrator;
 - un flux complet prin WebSocket și API (comandă → acceptare → SMS → link → finalizare), inclusiv doi șoferi care acceptă simultan: drepturi pe roluri, cereri respinse de pe alte site-uri, deconectarea la dezactivare și la ieșire, conținutul jurnalului;
 - API-ul aplicației șoferului: sesiuni cu token, poziția prin HTTP, comenzile și cursa (și anularea ei) în răspuns, acceptarea prin HTTP, mașina „conectată” fără WebSocket.
@@ -309,5 +370,6 @@ GitHub Actions rulează testele și construiește APK-ul la fiecare modificare (
 - **Fără notificări push:** comenzile noi ajung în aplicație odată cu trimiterea poziției, deci doar cât timp tura e activă. Pentru anunțuri și cu tura oprită ar fi nevoie de Firebase Cloud Messaging.
 - **Hărțile OpenStreetMap în aplicație:** serverele gratuite de hărți pot limita cererile venite din aplicații. Harta e secundară pentru șofer (navigarea se face cu Google Maps / Waze); la nevoie folosiți un furnizor de hărți propriu.
 - **Starea de livrare a SMS-ului:** „trimis” înseamnă că furnizorul a preluat mesajul. Confirmarea de livrare la telefonul clientului (prin webhook) nu este încă urmărită.
+- **Asistentul vocal** ascultă doar microfonul calculatorului. Pentru vocea clientului și numărul lui (afișarea automată a clientului care sună, cu adresele anterioare) ar fi nevoie de integrarea cu o centrală telefonică VoIP.
 - **Timpul estimat** (în SMS, la șofer și în linkul clientului) se calculează din distanța în linie dreaptă, cu un factor pentru străzi. Pentru precizie mai mare se poate folosi un serviciu de rutare (OSRM, Google, Mapbox).
 - **Serviciile OpenStreetMap gratuite** (hărți, Nominatim, rutarea din simulator) au limite de utilizare echitabilă. La trafic mare folosiți un furnizor comercial sau propriul server de hărți.
