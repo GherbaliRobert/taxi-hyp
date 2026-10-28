@@ -29,6 +29,8 @@
   let draftMarker = null;
   let addressWasAutoFilled = false;
 
+  let mapVisible = false;
+
   init().catch((err) => {
     console.error(err);
     UI.toast('Eroare la pornire: ' + err.message, 'error');
@@ -39,12 +41,6 @@
     document.title = 'Dispecerat · ' + config.companyName;
     document.querySelectorAll('.company-name').forEach((n) => (n.textContent = config.companyName));
 
-    $('login-form').addEventListener('submit', (e) => {
-      e.preventDefault();
-      $('login-error').textContent = '';
-      connect($('password').value);
-    });
-    $('logout').addEventListener('click', logout);
     document.querySelectorAll('.tab').forEach((tab) =>
       tab.addEventListener('click', () => setTab(tab.dataset.tab))
     );
@@ -61,67 +57,70 @@
     // Timpii „acum X s” și starea „fără semnal” se recalculează periodic.
     setInterval(refreshTimes, 5000);
 
-    const saved = UI.session.get();
-    if (saved) connect(saved);
-    else showLogin();
+    UI.requireDispatcher(start, () => {
+      mapVisible = true;
+      map.invalidateSize();
+      if (!fittedOnce) fitToCars();
+    });
+  }
+
+  async function start() {
+    // Harta se creează înainte de conectare, ca primele mașini primite să aibă unde apărea.
+    map = UI.createMap($('map'), config);
+    map.on('click', (e) => {
+      if (activeTab === 'new') setPickup(e.latlng.lat, e.latlng.lng, true);
+    });
+    await connect();
   }
 
   // ---------- Conectare ----------
 
-  function connect(password) {
-    if (socket) socket.disconnect();
-    socket = io({ auth: { role: 'dispatcher', password } });
-    UI.setConnection($('conn'), 'connecting');
+  /** Conexiunea live; sesiunea e cookie-ul pus la autentificare. Se rezolvă la prima conectare. */
+  function connect() {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const settle = (fn, value) => {
+        if (!settled) {
+          settled = true;
+          fn(value);
+        }
+      };
+      // Dacă rețeaua blochează conexiunea live, afișăm totuși pagina (indicatorul arată „Deconectat”).
+      setTimeout(() => settle(resolve), 5000);
 
-    socket.on('connect', () => {
-      UI.session.set(password);
-      showApp();
-      UI.setConnection($('conn'), 'online');
-    });
-    socket.on('disconnect', () => UI.setConnection($('conn'), 'offline'));
-    socket.on('connect_error', (err) => {
-      if (err.message === 'unauthorized' || err.message === 'too_many_attempts') {
-        socket.disconnect();
-        UI.session.clear();
-        showLogin(
-          err.message === 'too_many_attempts'
-            ? 'Prea multe încercări greșite. Reîncercați peste câteva minute.'
-            : 'Parolă greșită.'
-        );
-      } else {
-        UI.setConnection($('conn'), 'offline');
-      }
-    });
-
-    socket.on('fleet:snapshot', onSnapshot);
-    socket.on('car:update', onCarUpdate);
-    socket.on('ride:update', onRideUpdate);
-  }
-
-  function logout() {
-    UI.session.clear();
-    if (socket) socket.disconnect();
-    location.reload();
-  }
-
-  function showLogin(error) {
-    $('app').hidden = true;
-    $('login').hidden = false;
-    $('login-error').textContent = error || '';
-    $('password').value = '';
-    $('password').focus();
-  }
-
-  function showApp() {
-    $('login').hidden = true;
-    $('app').hidden = false;
-    if (!map) {
-      map = UI.createMap($('map'), config);
-      map.on('click', (e) => {
-        if (activeTab === 'new') setPickup(e.latlng.lat, e.latlng.lng, true);
+      socket = io({ auth: { role: 'dispatcher' } });
+      UI.setConnection($('conn'), 'connecting');
+      socket.on('connect', () => {
+        UI.setConnection($('conn'), 'online');
+        settle(resolve);
       });
-    }
-    map.invalidateSize();
+      socket.on('disconnect', (reason) => {
+        UI.setConnection($('conn'), 'offline');
+        // Serverul a închis sesiunea: ieșire, cont dezactivat sau parolă schimbată.
+        if (reason === 'io server disconnect') UI.sessionLost();
+      });
+      socket.on('connect_error', (err) => {
+        if (err.message === 'unauthorized' || err.message === 'password_change_required') {
+          socket.disconnect();
+          if (settled) UI.sessionLost();
+          else settle(reject, Object.assign(new Error('Sesiunea a expirat'), { status: 401 }));
+        } else {
+          UI.setConnection($('conn'), 'offline');
+        }
+      });
+
+      socket.on('fleet:snapshot', onSnapshot);
+      socket.on('car:update', onCarUpdate);
+      socket.on('ride:update', onRideUpdate);
+    });
+  }
+
+  function fitToCars() {
+    const points = [...cars.values()].filter((e) => e.data.position).map((e) => [e.data.position.lat, e.data.position.lng]);
+    if (!points.length) return;
+    fittedOnce = true;
+    if (points.length > 1) map.fitBounds(points, { padding: [60, 60], maxZoom: 15 });
+    else map.setView(points[0], 15);
   }
 
   // ---------- Mașini ----------
@@ -136,12 +135,7 @@
     renderCarList();
     renderRides();
     syncRideLayers();
-    if (!fittedOnce) {
-      fittedOnce = true;
-      const points = carList.filter((c) => c.position).map((c) => [c.position.lat, c.position.lng]);
-      if (points.length > 1) map.fitBounds(points, { padding: [60, 60], maxZoom: 15 });
-      else if (points.length === 1) map.setView(points[0], 15);
-    }
+    if (!fittedOnce && mapVisible) fitToCars();
   }
 
   function onCarUpdate(car) {
@@ -380,7 +374,9 @@
         el(
           'div',
           {},
-          'Creată la ' + UI.formatTime(ride.createdAt) + (finishedAt ? ' · încheiată la ' + UI.formatTime(finishedAt) : '')
+          'Creată la ' + UI.formatTime(ride.createdAt) +
+            (ride.createdByName ? ' de ' + ride.createdByName : '') +
+            (finishedAt ? ' · încheiată la ' + UI.formatTime(finishedAt) + (ride.closedByName ? ' (' + ride.closedByName + ')' : '') : '')
         )
       ),
       actions.length ? el('div', { class: 'actions' }, actions) : null

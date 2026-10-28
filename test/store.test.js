@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { FleetStore, importCars } = require('../src/store');
 const { openDatabase, createRepository } = require('../src/db');
-const { hashPin, verifyPin } = require('../src/pin');
+const { hashSecret: hashPin, verifySecret: verifyPin } = require('../src/secret');
 
 const CARS = [
   { id: 'a', plate: 'B 01 AAA', model: 'Logan', driver: 'Ion Popescu', pin: '1111' },
@@ -441,4 +441,32 @@ test('emite evenimente la schimbări', () => {
     ['car', 'a', 'busy'],
     ['ride', '1', 'assigned'],
   ]);
+});
+
+test('cursa reține dispecerul care a creat-o și cine a închis-o', () => {
+  const { store, repo } = setup();
+  store.driverConnected('a');
+  store.driverConnected('b');
+  const userId = repo.insertUser({ username: 'maria', name: 'Maria', passwordHash: 'x', role: 'dispatcher', active: true, mustChangePassword: false, createdAt: 1 });
+  const maria = { role: 'dispatcher', userId, name: 'Maria' };
+
+  const r1 = newRide(store).ride;
+  assert.equal(r1.createdByName, '');
+  const r2 = store.createRide({ customerName: 'Dan', pickup: PICKUP, carId: 'b' }, maria).ride;
+  assert.equal(r2.createdByName, 'Maria');
+  assert.equal(r2.createdById, userId);
+
+  store.updateRideStatus(r1.id, 'completed', DRIVER_A);
+  store.updateRideStatus(r2.id, 'cancelled', maria);
+  assert.equal(store.getRide(r1.id).closedByName, 'Șofer');
+  assert.equal(store.getRide(r2.id).closedByName, 'Maria');
+  assert.equal(store.getRide(r2.id).createdByName, 'Maria');
+
+  assert.deepEqual(
+    store.rideStats({}).byDispatcher.map((d) => [d.name, d.total, d.completed, d.cancelled]),
+    [
+      ['', 1, 1, 0],
+      ['Maria', 1, 0, 1],
+    ]
+  );
 });

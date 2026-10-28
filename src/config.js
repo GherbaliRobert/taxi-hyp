@@ -26,19 +26,19 @@ function number(value, fallback) {
 
 function loadConfig(env = process.env) {
   const production = env.NODE_ENV === 'production';
-  let dispatcherPassword = env.DISPATCHER_PASSWORD;
-  if (!dispatcherPassword) {
-    if (production) {
-      throw new Error('Setați variabila DISPATCHER_PASSWORD în producție');
-    }
-    dispatcherPassword = 'dispecer';
-    console.warn('[config] DISPATCHER_PASSWORD nu e setată — se folosește parola de test "dispecer"');
-  }
+  // Parola contului „admin”, folosită o singură dată: la prima pornire, când nu există niciun cont.
+  // DISPATCHER_PASSWORD este acceptată pentru compatibilitate cu versiunea anterioară.
+  const adminPassword = env.ADMIN_PASSWORD || env.DISPATCHER_PASSWORD || '';
 
   return {
     port: number(env.PORT, 3000),
     companyName: env.COMPANY_NAME || 'Taxi Hyp',
-    dispatcherPassword,
+    // În dezvoltare, fără parolă setată: „admin”, care trebuie schimbată la prima autentificare.
+    adminPassword: adminPassword || (production ? '' : 'admin'),
+    adminPasswordIsDefault: !adminPassword,
+    sessionIdleHours: number(env.SESSION_IDLE_HOURS, 12),
+    // Fusul orar pentru datele scrise de server (ex. perioada din jurnal la exporturi).
+    timeZone: env.TIME_ZONE || 'Europe/Bucharest',
     databaseFile: env.DATABASE_FILE || path.join(__dirname, '..', 'data', 'taxi.db'),
     // Flota inițială, importată doar la prima pornire (când baza de date nu are mașini).
     seedCarsFile: env.CARS_FILE || path.join(__dirname, '..', 'data', 'cars.json'),

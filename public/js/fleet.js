@@ -23,7 +23,7 @@
     $('generate-pin').addEventListener('click', () => ($('pin').value = randomPin()));
     $('editor').addEventListener('submit', save);
 
-    UI.requireDispatcher(load);
+    UI.requireDispatcher(load, null, { adminOnly: true, title: 'Administrare flotă' });
     // Starea mașinilor (liberă / ocupată / deconectată) se reîmprospătează periodic.
     setInterval(() => !$('app').hidden && load().catch(() => {}), 30000);
   }
@@ -51,13 +51,16 @@
           el('td', { class: 'nowrap hint' }, car.lastSeen ? UI.timeAgo(car.lastSeen) : 'niciodată'),
           el(
             'td',
-            { class: 'num nowrap' },
-            el('button', { class: 'btn btn-sm', type: 'button', onclick: () => openEditor(car) }, 'Modifică'),
-            ' ',
+            {},
             el(
+              'div',
+              { class: 'row-actions' },
+              el('button', { class: 'btn btn-sm', type: 'button', onclick: () => openEditor(car) }, 'Modifică'),
+              el(
               'button',
               { class: 'btn btn-sm' + (car.active ? ' btn-danger' : ''), type: 'button', onclick: () => toggleActive(car) },
-              car.active ? 'Dezactivează' : 'Reactivează'
+                car.active ? 'Dezactivează' : 'Reactivează'
+              )
             )
           )
         )
@@ -114,11 +117,7 @@
       showSaved(result.car, body.pin);
       await load();
     } catch (err) {
-      if (err.status === 401) {
-        UI.session.clear();
-        location.reload();
-        return;
-      }
+      if (err.status === 401) return UI.sessionLost();
       $('editor-error').textContent = err.message;
     } finally {
       button.disabled = false;

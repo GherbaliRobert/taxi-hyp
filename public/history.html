@@ -8,30 +8,18 @@
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-  <div id="login" class="login" hidden>
-    <form class="login-card" id="login-form">
-      <div class="brand"><div class="brand-logo">TX</div><span class="company-name">Taxi</span></div>
-      <h1>Istoric curse</h1>
-      <p class="hint">Introduceți parola dispeceratului.</p>
-      <div class="field">
-        <label for="password">Parolă</label>
-        <input class="input" id="password" type="password" autocomplete="current-password" required>
-      </div>
-      <p class="error-text" id="login-error"></p>
-      <button class="btn btn-primary btn-block" type="submit">Intră</button>
-    </form>
-  </div>
-
   <div id="app" class="app" hidden>
     <header class="topbar">
       <div class="brand"><div class="brand-logo">TX</div><span class="company-name">Taxi</span></div>
       <nav class="nav" aria-label="Pagini dispecerat">
         <a href="/">Hartă</a>
         <a href="/history" aria-current="page">Istoric</a>
-        <a href="/fleet">Flotă</a>
+        <a href="/fleet" data-admin hidden>Flotă</a>
+        <a href="/users" data-admin hidden>Utilizatori</a>
+        <a href="/audit" data-admin hidden>Jurnal</a>
       </nav>
       <div class="spacer"></div>
-      <button class="btn btn-sm btn-ghost" id="logout" type="button">Ieșire</button>
+      <div class="user-menu" id="user-menu"></div>
     </header>
 
     <main class="page">
@@ -120,6 +108,23 @@
               </tr>
             </thead>
             <tbody id="drivers-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2 class="card-title">Pe dispeceri</h2>
+        <div class="table-scroll">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Dispecer</th>
+                <th class="num">Curse create</th>
+                <th class="num">Finalizate</th>
+                <th class="num">Anulate</th>
+              </tr>
+            </thead>
+            <tbody id="dispatchers-body"></tbody>
           </table>
         </div>
       </section>

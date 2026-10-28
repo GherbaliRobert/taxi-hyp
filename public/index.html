@@ -8,20 +8,6 @@
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-  <div id="login" class="login" hidden>
-    <form class="login-card" id="login-form">
-      <div class="brand"><div class="brand-logo">TX</div><span class="company-name">Taxi</span></div>
-      <h1>Dispecerat</h1>
-      <p class="hint">Introduceți parola dispeceratului pentru a vedea flota.</p>
-      <div class="field">
-        <label for="password">Parolă</label>
-        <input class="input" id="password" type="password" autocomplete="current-password" required>
-      </div>
-      <p class="error-text" id="login-error"></p>
-      <button class="btn btn-primary btn-block" type="submit">Intră</button>
-    </form>
-  </div>
-
   <div id="app" class="app" hidden>
     <header class="topbar">
       <div class="brand">
@@ -31,11 +17,13 @@
       <nav class="nav" aria-label="Pagini dispecerat">
         <a href="/" aria-current="page">Hartă</a>
         <a href="/history">Istoric</a>
-        <a href="/fleet">Flotă</a>
+        <a href="/fleet" data-admin hidden>Flotă</a>
+        <a href="/users" data-admin hidden>Utilizatori</a>
+        <a href="/audit" data-admin hidden>Jurnal</a>
       </nav>
       <div class="spacer"></div>
       <span class="conn" id="conn"></span>
-      <button class="btn btn-sm btn-ghost" id="logout" type="button">Ieșire</button>
+      <div class="user-menu" id="user-menu"></div>
     </header>
 
     <div class="layout">

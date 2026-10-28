@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const Geo = require('../shared/geo');
-const { hashPin, verifyPin, isValidPin } = require('./pin');
+const { hashSecret: hashPin, verifySecret: verifyPin, isValidPin } = require('./secret');
 
 const CAR_STATUSES = ['free', 'busy', 'offline'];
 const RIDE_STATUSES = ['assigned', 'arrived', 'in_progress', 'completed', 'cancelled'];
@@ -228,12 +228,20 @@ class FleetStore extends EventEmitter {
     return { ok: true, car: this.adminCars().find((c) => c.id === car.id) };
   }
 
-  /** Modifică datele mașinii; un PIN nou închide sesiunile deschise ale șoferului. */
+  /**
+   * Modifică datele mașinii; un PIN nou închide sesiunile deschise ale șoferului.
+   * Întoarce și `changes` ({ câmp: [vechi, nou] }, plus `pin: true`) pentru jurnal.
+   */
   updateCar(carId, input) {
     const car = this.cars.get(carId);
     if (!car) return { ok: false, error: 'Mașină inexistentă' };
     const data = this._validateCar(input, carId, { requirePin: false });
     if (data.error) return { ok: false, error: data.error };
+    const changes = {};
+    for (const field of ['plate', 'model', 'driver']) {
+      if (car[field] !== data[field]) changes[field] = [car[field], data[field]];
+    }
+    if (data.pin) changes.pin = true;
     car.plate = data.plate;
     car.model = data.model;
     car.driver = data.driver;
@@ -241,7 +249,7 @@ class FleetStore extends EventEmitter {
     this.repo.updateCar(this._carRecord(car));
     this.emit('car', car);
     if (data.pin) this.emit('car:revoked', car);
-    return { ok: true, car: this.adminCars().find((c) => c.id === car.id) };
+    return { ok: true, car: this.adminCars().find((c) => c.id === car.id), changes };
   }
 
   /** Dezactivarea scoate mașina de pe hartă și deconectează șoferul; istoricul ei rămâne. */
@@ -249,11 +257,12 @@ class FleetStore extends EventEmitter {
     const car = this.cars.get(carId);
     if (!car) return { ok: false, error: 'Mașină inexistentă' };
     if (!active && car.rideId) return { ok: false, error: 'Mașina are o cursă activă' };
+    if (car.active === Boolean(active)) return { ok: true, changed: false };
     car.active = Boolean(active);
     this.repo.updateCar(this._carRecord(car));
     this.emit('car', car);
     if (!car.active) this.emit('car:revoked', car);
-    return { ok: true };
+    return { ok: true, changed: true };
   }
 
   driverConnected(carId) {
@@ -354,7 +363,8 @@ class FleetStore extends EventEmitter {
 
   // ---- Curse ----
 
-  createRide(input) {
+  /** `actor` este dispecerul care creează cursa: { userId, name }. */
+  createRide(input, actor) {
     if (!input || typeof input !== 'object') return { ok: false, error: 'Date lipsă' };
     const customerName = cleanText(input.customerName, 80);
     const phone = cleanText(input.phone, 30);
@@ -390,6 +400,9 @@ class FleetStore extends EventEmitter {
       updatedAt: ts,
       statusTimes: { assigned: ts },
       distanceM: 0,
+      createdById: actor ? actor.userId : null,
+      createdByName: actor ? actor.name : '',
+      closedByName: '',
     };
     ride.id = this.repo.insertRide(ride);
     this._trackRide(ride);
@@ -404,7 +417,7 @@ class FleetStore extends EventEmitter {
 
   /**
    * Schimbă statusul unei curse.
-   * `actor` este { role: 'dispatcher' } sau { role: 'driver', carId }.
+   * `actor` este { role: 'dispatcher', userId, name } sau { role: 'driver', carId }.
    */
   updateRideStatus(rideId, status, actor) {
     const ride = this.rides.get(String(rideId));
@@ -426,6 +439,9 @@ class FleetStore extends EventEmitter {
     ride.status = status;
     ride.updatedAt = ts;
     ride.statusTimes[status] = ts;
+    if (FINISHED.has(status)) {
+      ride.closedByName = actor && actor.role === 'driver' ? 'Șofer' : (actor && actor.name) || 'Dispecerat';
+    }
     if (car && car.position) {
       // Kilometrajul pornește de la locul preluării clientului.
       if (status === 'in_progress') ride.odometerFrom = { ...car.position, ts };

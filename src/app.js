@@ -1,11 +1,14 @@
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
-const crypto = require('crypto');
 const express = require('express');
 const { Server } = require('socket.io');
 const { openDatabase, createRepository } = require('./db');
 const { FleetStore, importCars } = require('./store');
+const { Accounts } = require('./accounts');
+const { createAuditLog, rideSummary } = require('./audit');
+const { createApi, sessionToken, sameOrigin, hostnameOf } = require('./api');
+const { rideViewForDispatcher, rideViewForDriver } = require('./views');
 const { loadCars } = require('./config');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -15,14 +18,10 @@ const LEAFLET_DIR = path.dirname(require.resolve('leaflet/dist/leaflet.js'));
 // Limită pentru încercări greșite de autentificare (parolă dispecer / PIN șofer), per IP.
 const AUTH_WINDOW_MS = 10 * 60 * 1000;
 const AUTH_MAX_FAILURES = 20;
-const DAY_MS = 24 * 60 * 60 * 1000;
-const MAX_PAGE_SIZE = 10000;
-
-function safeEqual(a, b) {
-  const ba = Buffer.from(String(a));
-  const bb = Buffer.from(String(b));
-  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
-}
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+const PAGES = ['driver', 'history', 'fleet', 'users', 'audit'];
+const RIDE_STATUS_ACTIONS = { cancelled: 'ride_cancel', completed: 'ride_complete' };
 
 function createAuthLimiter(now = Date.now) {
   const failures = new Map();
@@ -47,59 +46,6 @@ function createAuthLimiter(now = Date.now) {
   };
 }
 
-function rideViewForDispatcher(ride) {
-  return {
-    id: ride.id,
-    customerName: ride.customerName,
-    phone: ride.phone,
-    address: ride.address,
-    notes: ride.notes,
-    pickup: ride.pickup,
-    carId: ride.carId,
-    carPlate: ride.carPlate,
-    driverName: ride.driverName,
-    status: ride.status,
-    createdAt: ride.createdAt,
-    updatedAt: ride.updatedAt,
-    statusTimes: ride.statusTimes,
-    distanceM: Math.round(ride.distanceM),
-    trackPath: `/track/${ride.token}`,
-  };
-}
-
-function rideViewForDriver(ride) {
-  return {
-    id: ride.id,
-    customerName: ride.customerName,
-    phone: ride.phone,
-    address: ride.address,
-    notes: ride.notes,
-    pickup: ride.pickup,
-    status: ride.status,
-    createdAt: ride.createdAt,
-  };
-}
-
-/** Filtrele de căutare din query string (/api/rides?from=…&to=…&carId=…&status=…&q=…). */
-function parseRideFilters(query) {
-  const num = (v) => (v === undefined || v === '' ? NaN : Number(v));
-  const text = (v) => (typeof v === 'string' ? v.trim().slice(0, 100) : '');
-  const status = text(query.status);
-  return {
-    filters: {
-      from: num(query.from),
-      to: num(query.to),
-      carId: text(query.carId),
-      status: ['active', 'completed', 'cancelled'].includes(status) ? status : '',
-      q: text(query.q),
-    },
-    page: {
-      limit: Math.min(MAX_PAGE_SIZE, Math.max(1, Math.trunc(num(query.limit)) || 50)),
-      offset: Math.max(0, Math.trunc(num(query.offset)) || 0),
-    },
-  };
-}
-
 function reply(ack, payload) {
   if (typeof ack === 'function') ack(payload);
 }
@@ -119,18 +65,30 @@ function createApp(config) {
   const repo = createRepository(db);
   seedFleet(repo, config);
   const store = new FleetStore({ repo, avgSpeedKmh: config.avgSpeedKmh });
+  const accounts = new Accounts({ repo, sessionIdleMs: (config.sessionIdleHours || 12) * HOUR_MS });
+  const admin = accounts.ensureAdmin(config.adminPassword, { mustChangePassword: config.adminPasswordIsDefault });
+  if (admin && config.adminPasswordIsDefault) {
+    console.warn('[conturi] A fost creat contul „admin” cu parola „admin”; va trebui schimbată la prima autentificare.');
+  } else if (admin) {
+    console.log('[conturi] A fost creat contul „admin” cu parola din configurare (ADMIN_PASSWORD).');
+  }
+  const audit = createAuditLog(repo);
   const limiter = createAuthLimiter();
 
-  const pruneRoutes = () => store.pruneRoutes(config.routeRetentionDays || 180);
-  pruneRoutes();
-  const pruneTimer = setInterval(pruneRoutes, DAY_MS);
-  pruneTimer.unref();
+  const maintenance = () => {
+    store.pruneRoutes(config.routeRetentionDays || 180);
+    accounts.pruneSessions();
+  };
+  maintenance();
+  const maintenanceTimer = setInterval(maintenance, DAY_MS);
+  maintenanceTimer.unref();
 
   const app = express();
   app.disable('x-powered-by');
   if (config.trustProxy) app.set('trust proxy', true);
   app.use((req, res, next) => {
     res.set('X-Content-Type-Options', 'nosniff');
+    res.set('X-Frame-Options', 'DENY');
     // Linkul de urmărire conține un token secret: nu-l trimitem altor site-uri (ex. serverul de hărți).
     res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
     next();
@@ -146,61 +104,11 @@ function createApp(config) {
     })
   );
   app.get('/api/cars', (req, res) => res.json(store.carDirectory()));
+  app.use('/api', createApi({ store, accounts, audit, limiter, config }));
 
-  // ---- API pentru dispecerat (istoric, flotă): parola în antetul Authorization ----
-
-  const api = express.Router();
-  api.use((req, res, next) => {
-    const key = req.ip;
-    if (limiter.blocked(key)) return res.status(429).json({ error: 'Prea multe încercări. Reîncercați mai târziu.' });
-    const header = req.get('authorization') || '';
-    const password = header.startsWith('Bearer ') ? header.slice(7) : '';
-    if (password && safeEqual(password, config.dispatcherPassword)) return next();
-    limiter.fail(key);
-    res.status(401).json({ error: 'Parolă greșită' });
-  });
-  api.use(express.json({ limit: '20kb' }));
-
-  api.get('/rides', (req, res) => {
-    const { filters, page } = parseRideFilters(req.query);
-    const { rides, total } = store.searchRides(filters, page);
-    res.json({ rides: rides.map(rideViewForDispatcher), total, stats: store.rideStats(filters) });
-  });
-
-  api.get('/rides/:id/route', (req, res) => {
-    const ride = store.getRide(req.params.id);
-    if (!ride) return res.status(404).json({ error: 'Cursă inexistentă' });
-    res.json({ ride: rideViewForDispatcher(ride), points: store.rideRoute(ride.id) });
-  });
-
-  api.get('/fleet', (req, res) => res.json(store.adminCars()));
-
-  api.post('/fleet', (req, res) => {
-    const result = store.createCar(req.body);
-    res.status(result.ok ? 201 : 400).json(result);
-  });
-
-  api.put('/fleet/:id', (req, res) => {
-    const { id } = req.params;
-    const body = req.body || {};
-    if (!store.adminCars().some((c) => c.id === id)) return res.status(404).json({ ok: false, error: 'Mașină inexistentă' });
-    // Corpul poate conține datele mașinii, doar { active }, sau ambele.
-    let result = { ok: true };
-    if (['plate', 'model', 'driver', 'pin'].some((key) => key in body)) result = store.updateCar(id, body);
-    if (result.ok && typeof body.active === 'boolean') result = store.setCarActive(id, body.active);
-    if (!result.ok) return res.status(400).json(result);
-    res.json({ ok: true, car: store.adminCars().find((c) => c.id === id) });
-  });
-
-  app.use('/api', api);
-  app.use('/api', (err, req, res, next) => {
-    if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'JSON invalid' });
-    next(err);
-  });
-
-  app.get('/driver', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'driver.html')));
-  app.get('/history', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'history.html')));
-  app.get('/fleet', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'fleet.html')));
+  for (const page of PAGES) {
+    app.get(`/${page}`, (req, res) => res.sendFile(path.join(PUBLIC_DIR, `${page}.html`)));
+  }
   app.get('/track/:token', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'track.html')));
   app.use('/vendor/leaflet', express.static(LEAFLET_DIR));
   app.use('/shared', express.static(SHARED_DIR));
@@ -217,6 +125,18 @@ function createApp(config) {
     return socket.handshake.address;
   }
 
+  function handshakeHostname(socket) {
+    const headers = socket.handshake.headers;
+    const host = (config.trustProxy && headers['x-forwarded-host']) || headers.host || '';
+    return hostnameOf(String(host).split(',')[0].trim(), false);
+  }
+
+  /** Utilizatorul sesiunii din cookie-ul conexiunii, reverificat (cont dezactivat, sesiune expirată). */
+  function dispatcherUser(socket) {
+    const user = accounts.authenticate(sessionToken(socket.handshake.headers.cookie));
+    return user && !user.mustChangePassword ? user : null;
+  }
+
   io.use((socket, next) => {
     const auth = socket.handshake.auth || {};
     const key = clientKey(socket);
@@ -228,11 +148,17 @@ function createApp(config) {
       return next();
     }
 
-    if (limiter.blocked(key)) return next(new Error('too_many_attempts'));
-    if (auth.role === 'dispatcher' && safeEqual(auth.password, config.dispatcherPassword)) {
-      socket.data = { role: 'dispatcher' };
+    if (auth.role === 'dispatcher') {
+      // Doar paginile aplicației pot folosi sesiunea dispecerului (nu și alte site-uri).
+      if (!sameOrigin(socket.handshake.headers.origin, handshakeHostname(socket))) return next(new Error('unauthorized'));
+      const user = accounts.authenticate(sessionToken(socket.handshake.headers.cookie));
+      if (!user) return next(new Error('unauthorized'));
+      if (user.mustChangePassword) return next(new Error('password_change_required'));
+      socket.data = { role: 'dispatcher', user };
       return next();
     }
+
+    if (limiter.blocked(key)) return next(new Error('too_many_attempts'));
     if (auth.role === 'driver' && store.verifyDriver(auth.carId, auth.pin)) {
       socket.data = { role: 'driver', carId: auth.carId };
       return next();
@@ -250,22 +176,45 @@ function createApp(config) {
   });
 
   function onDispatcher(socket) {
-    socket.join('dispatchers');
+    const { user } = socket.data;
+    socket.join(['dispatchers', `user:${user.id}`, `session:${user.sessionId}`]);
     socket.emit('fleet:snapshot', {
+      user: accounts.publicUser(user),
       cars: store.listCars(),
       rides: store.listRides().map(rideViewForDispatcher),
     });
 
-    socket.on('ride:create', (data, ack) => {
-      const result = store.createRide(data);
-      reply(ack, result.ok ? { ok: true, ride: rideViewForDispatcher(result.ride) } : result);
-    });
+    /** Rulează acțiunea doar dacă sesiunea este încă validă; altfel închide conexiunea. */
+    const withUser = (handler) => (data, ack) => {
+      const actor = dispatcherUser(socket);
+      if (!actor) {
+        reply(ack, { ok: false, error: 'Sesiunea a expirat. Autentificați-vă din nou.' });
+        return socket.disconnect(true);
+      }
+      handler(actor, data, ack);
+    };
 
-    socket.on('ride:status', (data, ack) => {
-      const { rideId, status } = data || {};
-      const result = store.updateRideStatus(rideId, status, { role: 'dispatcher' });
-      reply(ack, result.ok ? { ok: true } : result);
-    });
+    socket.on(
+      'ride:create',
+      withUser((actor, data, ack) => {
+        const result = store.createRide(data, { userId: actor.id, name: actor.name });
+        if (!result.ok) return reply(ack, result);
+        audit.log(actor, 'ride_create', `ride:${result.ride.id}`, rideSummary(result.ride), clientKey(socket));
+        reply(ack, { ok: true, ride: rideViewForDispatcher(result.ride) });
+      })
+    );
+
+    socket.on(
+      'ride:status',
+      withUser((actor, data, ack) => {
+        const { rideId, status } = data || {};
+        const result = store.updateRideStatus(rideId, status, { role: 'dispatcher', userId: actor.id, name: actor.name });
+        if (!result.ok) return reply(ack, result);
+        const action = RIDE_STATUS_ACTIONS[status] || 'ride_status';
+        audit.log(actor, action, `ride:${result.ride.id}`, rideSummary(result.ride), clientKey(socket));
+        reply(ack, { ok: true });
+      })
+    );
   }
 
   function onDriver(socket) {
@@ -312,6 +261,14 @@ function createApp(config) {
   // PIN schimbat sau mașină dezactivată: șoferul trebuie să se autentifice din nou.
   store.on('car:revoked', (car) => io.in(`car:${car.id}`).disconnectSockets(true));
 
+  // Cont dezactivat, parolă resetată sau schimbată, ieșire: închidem conexiunile live ale sesiunilor.
+  accounts.on('sessions:revoked', ({ userId, exceptSessionId }) => {
+    let sockets = io.in(`user:${userId}`);
+    if (exceptSessionId) sockets = sockets.except(`session:${exceptSessionId}`);
+    sockets.disconnectSockets(true);
+  });
+  accounts.on('session:revoked', (sessionId) => io.in(`session:${sessionId}`).disconnectSockets(true));
+
   store.on('ride', (ride) => {
     io.to('dispatchers').emit('ride:update', rideViewForDispatcher(ride));
     io.to(`car:${ride.carId}`).emit('ride:update', rideViewForDriver(ride));
@@ -319,13 +276,13 @@ function createApp(config) {
   });
 
   async function close() {
-    clearInterval(pruneTimer);
+    clearInterval(maintenanceTimer);
     io.close();
     if (httpServer.listening) await new Promise((resolve) => httpServer.close(resolve));
     db.close();
   }
 
-  return { app, httpServer, io, store, db, close };
+  return { app, httpServer, io, store, accounts, db, close };
 }
 
 module.exports = { createApp };

@@ -34,10 +34,14 @@
     $('export').addEventListener('click', () => run(exportCsv()));
     setRange('7');
 
-    UI.requireDispatcher(start, () => {
-      if (!map) map = UI.createMap($('map'), config);
-      map.invalidateSize();
-    });
+    UI.requireDispatcher(
+      start,
+      () => {
+        if (!map) map = UI.createMap($('map'), config);
+        map.invalidateSize();
+      },
+      { title: 'Istoric curse' }
+    );
   }
 
   async function start() {
@@ -62,8 +66,7 @@
   function run(promise) {
     promise.catch((err) => {
       if (err.status === 401) {
-        UI.session.clear();
-        location.reload();
+        UI.sessionLost();
       } else {
         UI.toast(err.message, 'error');
       }
@@ -72,42 +75,15 @@
 
   // ---------- Perioada ----------
 
-  function toInput(d) {
-    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-  }
-
-  function fromInput(value) {
-    const [y, m, d] = value.split('-').map(Number);
-    return new Date(y, m - 1, d);
-  }
-
   function setRange(kind) {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    let from = new Date(today);
-    let to = new Date(today);
-    if (kind === 'yesterday') {
-      from.setDate(from.getDate() - 1);
-      to = new Date(from);
-    } else if (kind === '7') {
-      from.setDate(from.getDate() - 6);
-    } else if (kind === 'month') {
-      from.setDate(1);
-    } else if (kind === 'prev-month') {
-      from = new Date(today.getFullYear(), today.getMonth() - 1, 1);
-      to = new Date(today.getFullYear(), today.getMonth(), 0);
-    }
-    $('from').value = toInput(from);
-    $('to').value = toInput(to);
+    const range = UI.quickRange(kind);
+    $('from').value = range.from;
+    $('to').value = range.to;
   }
 
   function query(extra) {
-    if (!$('from').value || !$('to').value) throw new Error('Alegeți perioada');
-    const from = fromInput($('from').value);
-    const to = fromInput($('to').value);
-    if (from > to) throw new Error('Data de început este după data de sfârșit');
-    to.setDate(to.getDate() + 1); // inclusiv ziua de sfârșit
-    const params = new URLSearchParams({ from: from.getTime(), to: to.getTime(), ...extra });
+    const { from, to } = UI.dateInputsRange($('from').value, $('to').value);
+    const params = new URLSearchParams({ from, to, ...extra });
     if ($('car').value) params.set('carId', $('car').value);
     if ($('status').value) params.set('status', $('status').value);
     if ($('q').value.trim()) params.set('q', $('q').value.trim());
@@ -124,6 +100,27 @@
     renderTable();
     renderPager();
     renderDrivers(data.stats.byDriver);
+    renderDispatchers(data.stats.byDispatcher);
+  }
+
+  function renderDispatchers(rows) {
+    const body = $('dispatchers-body');
+    if (!rows.length) {
+      body.replaceChildren(el('tr', {}, el('td', { colspan: '4', class: 'empty' }, '—')));
+      return;
+    }
+    body.replaceChildren(
+      ...rows.map((r) =>
+        el(
+          'tr',
+          {},
+          el('td', {}, r.name || el('span', { class: 'hint' }, 'nespecificat (înainte de conturi)')),
+          el('td', { class: 'num' }, r.total),
+          el('td', { class: 'num' }, r.completed),
+          el('td', { class: 'num' }, r.cancelled)
+        )
+      )
+    );
   }
 
   function waitMs(ride) {
@@ -292,6 +289,8 @@
         ride.phone ? el('div', {}, 'Telefon: ', el('a', { href: 'tel:' + ride.phone }, ride.phone)) : null,
         el('div', {}, 'Preluare: ' + (ride.address || coords(ride.pickup))),
         el('div', {}, 'Mașina: ' + ride.carPlate + ' · ' + ride.driverName),
+        ride.createdByName ? el('div', {}, 'Dispecer: ' + ride.createdByName) : null,
+        ride.closedByName ? el('div', {}, (ride.status === 'cancelled' ? 'Anulată de: ' : 'Încheiată de: ') + ride.closedByName) : null,
         ride.notes ? el('div', {}, 'Observații: ' + ride.notes) : null,
         ride.status === 'completed' ? el('div', {}, 'Distanță cu clientul: ' + UI.formatKm(ride.distanceM)) : null
       ),
@@ -317,12 +316,13 @@
   // ---------- Export ----------
 
   async function exportCsv() {
-    const params = query({ limit: EXPORT_LIMIT, offset: 0 });
+    // `export=1` înregistrează exportul în jurnal (fișierul conține date personale ale clienților).
+    const params = query({ limit: EXPORT_LIMIT, offset: 0, export: '1' });
     const button = $('export');
     button.disabled = true;
     try {
       const data = await UI.api('/api/rides?' + params);
-      const header = ['Nr', 'Data', 'Ora', 'Client', 'Telefon', 'Adresă preluare', 'Observații', 'Mașina', 'Șofer', 'Status', 'Așteptare (min)', 'Durată (min)', 'Km cu clientul'];
+      const header = ['Nr', 'Data', 'Ora', 'Client', 'Telefon', 'Adresă preluare', 'Observații', 'Mașina', 'Șofer', 'Status', 'Așteptare (min)', 'Durată (min)', 'Km cu clientul', 'Dispecer', 'Închisă de'];
       const minutes = (ms) => (ms === null ? '' : Math.round(ms / 60000));
       const rows = data.rides
         .slice()
@@ -343,6 +343,8 @@
             minutes(waitMs(r)),
             minutes(durationMs(r)),
             r.status === 'completed' ? (r.distanceM / 1000).toFixed(1).replace('.', ',') : '',
+            r.createdByName,
+            r.closedByName,
           ];
         });
       // BOM + „;” ca separator: Excel în limba română deschide corect diacriticele și coloanele.

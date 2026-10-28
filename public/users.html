@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Utilizatori</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="brand"><div class="brand-logo">TX</div><span class="company-name">Taxi</span></div>
+      <nav class="nav" aria-label="Pagini dispecerat">
+        <a href="/">Hartă</a>
+        <a href="/history">Istoric</a>
+        <a href="/fleet" data-admin hidden>Flotă</a>
+        <a href="/users" aria-current="page" data-admin hidden>Utilizatori</a>
+        <a href="/audit" data-admin hidden>Jurnal</a>
+      </nav>
+      <div class="spacer"></div>
+      <div class="user-menu" id="user-menu"></div>
+    </header>
+
+    <main class="page narrow">
+      <div class="page-head">
+        <div>
+          <h1>Utilizatori</h1>
+          <p class="hint">Fiecare dispecer are contul lui; ce face fiecare apare în Jurnal.</p>
+        </div>
+        <button class="btn btn-primary" id="add" type="button">+ Adaugă utilizator</button>
+      </div>
+
+      <form class="card editor" id="editor" hidden novalidate>
+        <h2 class="card-title" id="editor-title">Utilizator nou</h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="name">Nume</label>
+            <input class="input" id="name" maxlength="80" required autocomplete="off" placeholder="Prenume Nume">
+          </div>
+          <div class="field">
+            <label for="username">Utilizator (pentru autentificare)</label>
+            <input class="input" id="username" maxlength="32" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="ex. maria.ionescu">
+          </div>
+          <div class="field">
+            <label for="role">Rol</label>
+            <select class="input" id="role">
+              <option value="dispatcher">Dispecer — hartă, curse, istoric</option>
+              <option value="admin">Administrator — în plus flotă, utilizatori, jurnal</option>
+            </select>
+          </div>
+        </div>
+        <p class="hint" id="editor-hint"></p>
+        <p class="error-text" id="editor-error"></p>
+        <div class="row">
+          <button class="btn btn-primary" type="submit">Salvează</button>
+          <button class="btn" id="cancel" type="button">Renunță</button>
+        </div>
+      </form>
+
+      <div class="result-box" id="saved" hidden></div>
+
+      <section class="card table-card">
+        <div class="table-scroll">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Nume</th>
+                <th>Utilizator</th>
+                <th>Rol</th>
+                <th>Stare</th>
+                <th>Ultima autentificare</th>
+                <th class="actions-head">Acțiuni</th>
+              </tr>
+            </thead>
+            <tbody id="users-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/js/common.js"></script>
+  <script src="/js/users.js"></script>
+</body>
+</html>

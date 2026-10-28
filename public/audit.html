@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Jurnal</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="brand"><div class="brand-logo">TX</div><span class="company-name">Taxi</span></div>
+      <nav class="nav" aria-label="Pagini dispecerat">
+        <a href="/">Hartă</a>
+        <a href="/history">Istoric</a>
+        <a href="/fleet" data-admin hidden>Flotă</a>
+        <a href="/users" data-admin hidden>Utilizatori</a>
+        <a href="/audit" aria-current="page" data-admin hidden>Jurnal</a>
+      </nav>
+      <div class="spacer"></div>
+      <div class="user-menu" id="user-menu"></div>
+    </header>
+
+    <main class="page">
+      <div class="page-head">
+        <div>
+          <h1>Jurnal</h1>
+          <p class="hint">Cine ce a făcut și când: autentificări, curse, modificări în flotă și conturi, exporturi.</p>
+        </div>
+      </div>
+
+      <form class="card filters" id="filters">
+        <div class="field">
+          <label for="from">De la</label>
+          <input class="input" id="from" type="date" required>
+        </div>
+        <div class="field">
+          <label for="to">Până la</label>
+          <input class="input" id="to" type="date" required>
+        </div>
+        <div class="field">
+          <label for="user">Utilizator</label>
+          <select class="input" id="user"><option value="">Toți</option></select>
+        </div>
+        <div class="field">
+          <label for="category">Tip</label>
+          <select class="input" id="category">
+            <option value="">Toate</option>
+            <option value="auth">Autentificări</option>
+            <option value="ride">Curse</option>
+            <option value="car">Flotă</option>
+            <option value="user">Utilizatori</option>
+            <option value="history">Exporturi</option>
+          </select>
+        </div>
+        <div class="filter-actions">
+          <button class="btn btn-primary" type="submit">Aplică</button>
+        </div>
+        <div class="quick-ranges">
+          <button class="btn btn-sm" type="button" data-range="today">Azi</button>
+          <button class="btn btn-sm" type="button" data-range="yesterday">Ieri</button>
+          <button class="btn btn-sm" type="button" data-range="7">Ultimele 7 zile</button>
+          <button class="btn btn-sm" type="button" data-range="month">Luna aceasta</button>
+        </div>
+      </form>
+
+      <section class="card table-card">
+        <div class="table-scroll">
+          <table class="table table-stack">
+            <thead>
+              <tr>
+                <th>Data</th>
+                <th>Utilizator</th>
+                <th>Acțiune</th>
+                <th>Detalii</th>
+                <th>IP</th>
+              </tr>
+            </thead>
+            <tbody id="audit-body"></tbody>
+          </table>
+        </div>
+        <div class="pager" id="pager"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/js/common.js"></script>
+  <script src="/js/audit.js"></script>
+</body>
+</html>
