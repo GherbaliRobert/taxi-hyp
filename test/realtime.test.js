@@ -517,6 +517,24 @@ test('aplicația șoferului: token, poziție prin HTTP și cursa în răspuns', 
   const afterCancel = await driverApi('/api/driver/location', { token, body: { lat: 44.413, lng: 26.1 } });
   assert.deepEqual([afterCancel.body.ride.id, afterCancel.body.ride.status], [created.ride.id, 'cancelled']);
   assert.equal(afterCancel.body.car.rideId, null);
+  assert.equal(afterCancel.body.car.gpsOk, true);
+
+  // Fără GPS nu se lucrează: tura încheiată → dispecerul vede „fără GPS”, comenzile nu mai ajung la mașină.
+  const noGps = waitFor(dispatcher, 'car:update', (c) => c.id === 'b' && c.gpsOk === false);
+  const off = await driverApi('/api/driver/gps-off', { token });
+  assert.equal(off.body.car.gpsOk, false);
+  await noGps;
+  const refused = await dispatcher.emitWithAck('ride:create', { customerName: 'Ion', pickup: { lat: 44.42, lng: 26.1 }, target: { mode: 'car', carId: 'b' } });
+  assert.match(refused.error, /nu are GPS/);
+  // O poziție veche retrimisă (telefon fără semnal) nu repornește GPS-ul; una nouă, da.
+  await new Promise((r) => setTimeout(r, 550));
+  const stale = await driverApi('/api/driver/location', { token, body: { lat: 44.414, lng: 26.1, age: 5 * 60 * 1000 } });
+  assert.equal(stale.body.car.gpsOk, false);
+  const fresh = await driverApi('/api/driver/location', { token, body: { lat: 44.414, lng: 26.1, age: 300 } });
+  assert.equal(fresh.body.car.gpsOk, true);
+  // Și prin WebSocket (pagina șoferului din browser).
+  assert.equal((await socket.emitWithAck('gps:off', {})).ok, true);
+  assert.equal((await driverApi('/api/driver/state', { method: 'GET', token })).body.car.gpsOk, false);
 
   // Ieșirea: tokenul nu mai e valid, mașina apare deconectată după închiderea WebSocket-ului.
   const offline = waitFor(dispatcher, 'car:update', (c) => c.id === 'b' && c.status === 'offline');
@@ -532,6 +550,8 @@ test('doi șoferi acceptă în același timp: doar primul primește cursa', asyn
   const a = client({ role: 'driver', carId: 'a', pin: '1111' });
   const b = client({ role: 'driver', carId: 'b', pin: '2222' });
   await Promise.all([waitFor(a, 'driver:init'), waitFor(b, 'driver:init')]);
+  // Comenzile ajung doar la mașinile cu GPS.
+  await Promise.all([a.emitWithAck('location', { lat: 44.421, lng: 26.1 }), b.emitWithAck('location', { lat: 44.422, lng: 26.1 })]);
   const offers = Promise.all([waitFor(a, 'offer:new'), waitFor(b, 'offer:new')]);
   const created = await dispatcher.emitWithAck('ride:create', { customerName: 'Ioana', pickup: { lat: 44.43, lng: 26.1 }, target: { mode: 'all' } });
   await offers;

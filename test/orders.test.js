@@ -11,6 +11,8 @@ const CARS = [
 ];
 const PICKUP = { lat: 44.43, lng: 26.1 };
 const OFFER_MS = 60 * 1000;
+// a la ~1 km de client, b la ~3 km, c la ~5 km.
+const POSITIONS = { a: 44.421, b: 44.403, c: 44.385 };
 
 function setup() {
   let t = 1_700_000_000_000;
@@ -19,14 +21,17 @@ function setup() {
   importCars(repo, CARS, t);
   const make = () => new FleetStore({ repo, now: clock.now, offerTimeoutMs: OFFER_MS });
   const store = make();
-  // Trei mașini libere: a la ~1 km de client, b la ~3 km, c la ~5 km.
-  for (const [id, lat] of [['a', 44.421], ['b', 44.403], ['c', 44.385]]) {
-    store.driverConnected(id);
-    store.updateLocation(id, { lat, lng: 26.1 });
-  }
+  // Trei mașini libere, cu GPS.
+  for (const id of Object.keys(POSITIONS)) store.driverConnected(id);
+  gps(store);
   const offers = [];
   store.on('offer', (o) => offers.push([o.carId, o.response]));
   return { store, clock, repo, offers, restart: make };
+}
+
+/** Telefoanele trimit poziția (fără ea, după un minut mașina nu mai primește comenzi). */
+function gps(store, ids = Object.keys(POSITIONS)) {
+  for (const id of ids) store.updateLocation(id, { lat: POSITIONS[id], lng: 26.1 });
 }
 
 function order(store, target, extra) {
@@ -112,6 +117,7 @@ test('refuzul, expirarea și retrimiterea comenzii', () => {
 
   clock.advance(OFFER_MS + 1);
   store.expireOffers();
+  gps(store);
   assert.deepEqual(store.rideOffers(ride.id).map((o) => o.response), ['declined', 'expired']);
   assert.match(store.acceptOffer(ride.id, 'b').error, /expirat/);
   assert.equal(store.getRide(ride.id).status, 'pending'); // dispecerul decide: retrimite sau anulează
@@ -155,6 +161,42 @@ test('mașina ocupată, deconectată sau cu altă cursă nu mai are oferta', () 
   clock.advance(1000);
   assert.equal(store.getCarView('c').status, 'offline');
   assert.equal(store.rideOffers(second.id).find((o) => o.carId === 'c').response, 'withdrawn');
+});
+
+test('GPS-ul e obligatoriu: fără poziții recente mașina nu primește comenzi', () => {
+  const { store, clock } = setup();
+  const gpsEvents = [];
+  store.on('car', (c) => gpsEvents.push([c.id, store.getCarView(c.id).gpsOk]));
+
+  // Șoferul mașinii a oprește GPS-ul: oferta lui se retrage, nu mai poate accepta și nu mai primește comenzi.
+  const first = order(store, { mode: 'all' }).ride;
+  store.gpsLost('a');
+  assert.equal(store.getCarView('a').gpsOk, false);
+  assert.equal(store.getCarView('a').status, 'free'); // conectat, dar fără GPS
+  assert.deepEqual(gpsEvents, [['a', false]]);
+  assert.equal(store.rideOffers(first.id).find((o) => o.carId === 'a').response, 'withdrawn');
+  assert.match(store.acceptOffer(first.id, 'a').error, /Porniți GPS-ul/);
+  assert.deepEqual(order(store, { mode: 'all' }).offeredTo, ['b', 'c']);
+  assert.match(order(store, { mode: 'car', carId: 'a' }).error, /nu are GPS/);
+
+  // GPS-ul repornit: prima poziție nouă îl face din nou disponibil.
+  clock.advance(1000);
+  gps(store, ['a']);
+  assert.equal(store.getCarView('a').gpsOk, true);
+
+  // Telefonul mașinii b nu mai are semnal: retrimite doar poziția veche (cu vârsta ei), care nu contează.
+  clock.advance(30 * 1000);
+  store.updateLocation('b', { lat: POSITIONS.b, lng: 26.1, age: 30 * 1000 });
+  clock.advance(31 * 1000);
+  gps(store, ['a', 'c']);
+  gpsEvents.length = 0;
+  store.sweepPresence();
+  assert.deepEqual(gpsEvents, [['b', false]]);
+  assert.deepEqual(order(store, { mode: 'all' }).offeredTo, ['a', 'c']);
+
+  // O mașină deconectată nu are nici ea GPS.
+  store.driverDisconnected('c');
+  assert.equal(store.getCarView('c').gpsOk, false);
 });
 
 test('linkul clientului există doar cât timp cursa e în desfășurare', () => {

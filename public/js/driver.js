@@ -25,6 +25,10 @@
   const NATIVE_MOVING_INTERVAL_MS = 2000;
   const NATIVE_IDLE_INTERVAL_MS = 10000;
   const NATIVE_MIN_MOVE_M = 5;
+  // GPS-ul este obligatoriu: fără o poziție nouă de un minut, mașina nu mai primește comenzi (ca pe server).
+  const GPS_LOST_MS = 60 * 1000;
+  // Unele browsere nu dau poziții noi cât mașina stă pe loc; după atâtea ms cerem noi una.
+  const FIX_REFRESH_MS = 20 * 1000;
 
   let config;
   let serverUrl = NATIVE ? storageGet(SERVER_KEY) || (window.TAXI_APP && window.TAXI_APP.serverUrl) || '' : '';
@@ -33,7 +37,10 @@
   let car = null;
   let ride = null;
   let gpsOn = false;
+  let gpsStartedAt = 0;
+  let shownGpsState = '';
   let watchId = null; // browser
+  let refreshingFix = false;
   let watcherId = null; // aplicație
   let wakeLock = null;
   let lastFix = null;
@@ -73,9 +80,11 @@
     setInterval(updateOfferCountdowns, 1000);
     $('gps-toggle').addEventListener('click', () => {
       unlockAudio();
+      if (gpsOn && ride) return UI.toast('GPS-ul rămâne pornit până la finalizarea cursei.', 'error');
       if (gpsOn) stopGps();
       else startGps();
     });
+    setInterval(renderGpsState, 5000);
     document.querySelectorAll('#status-toggle button').forEach((btn) =>
       btn.addEventListener('click', () => setStatus(btn.dataset.status))
     );
@@ -90,6 +99,9 @@
         appActive = isActive;
         if (isActive && session) refreshState();
       });
+      // Și fără poziții noi (ex. locația oprită din meniul rapid), aplicația anunță serverul la 10 s;
+      // poziția retrimisă are vârsta ei, deci dispeceratul vede „fără GPS”.
+      setInterval(() => gpsOn && sendNativeLocation(false), 5000);
       LocalNotifications.createChannel({
         id: RIDE_CHANNEL,
         name: 'Curse noi',
@@ -389,6 +401,7 @@
     }
     renderRide();
     renderOffers();
+    renderGpsState();
   }
 
   function renderRide() {
@@ -634,16 +647,56 @@
   // ---------- GPS ----------
 
   function setGpsUi(on, info) {
+    if (on && !gpsOn) gpsStartedAt = Date.now();
     gpsOn = on;
     const toggle = $('gps-toggle');
     toggle.textContent = NATIVE ? (on ? 'Încheie tura' : 'Începe tura') : on ? 'Oprește GPS' : 'Pornește GPS';
     toggle.classList.toggle('btn-dark', on);
     toggle.classList.toggle('btn-primary', !on);
     $('gps-info').textContent = info;
+    renderGpsState();
+  }
+
+  /** off: oprit · searching: pornit, așteaptă prima poziție · ok · lost: fără poziție nouă de peste un minut. */
+  function gpsState() {
+    if (!gpsOn) return 'off';
+    const now = Date.now();
+    const fixAt = lastFix && lastFix.ts >= gpsStartedAt ? lastFix.ts : 0;
+    if (fixAt && now - fixAt < GPS_LOST_MS) return 'ok';
+    return now - Math.max(fixAt, gpsStartedAt) < GPS_LOST_MS ? 'searching' : 'lost';
+  }
+
+  /** Avertismentul roșu: fără GPS nu se primesc comenzi. În timpul cursei, GPS-ul nu se poate opri. */
+  function renderGpsState() {
+    const locked = gpsOn && Boolean(ride);
+    $('gps-toggle').disabled = locked;
+    $('gps-lock').hidden = !locked;
+
+    const state = gpsState();
+    if (state === shownGpsState) return;
+    const previous = shownGpsState;
+    shownGpsState = state;
+    $('gps-card').dataset.gps = state;
+    const warning = $('gps-warning');
+    if (state === 'off') {
+      warning.replaceChildren('GPS-ul este obligatoriu: cât timp este oprit nu primiți comenzi.');
+    } else if (state === 'lost') {
+      warning.replaceChildren(
+        ...[
+          'Fără semnal GPS de peste un minut. Verificați că locația telefonului este pornită. Până revine semnalul nu primiți comenzi.',
+          NATIVE ? el('div', {}, el('button', { class: 'btn btn-sm', type: 'button', onclick: () => BackgroundGeolocation.openSettings() }, 'Deschide setările')) : null,
+        ].filter(Boolean)
+      );
+      if (previous === 'ok') {
+        alertDriver();
+        notify(9002, 'GPS oprit', 'Porniți locația telefonului: fără GPS nu primiți comenzi.');
+      }
+    }
   }
 
   async function startGps() {
     $('gps-error').textContent = '';
+    if (gpsOn) return;
     if (NATIVE) return startNativeGps();
     if (!('geolocation' in navigator)) {
       $('gps-error').textContent = 'Acest browser nu suportă localizarea.';
@@ -706,7 +759,7 @@
     if (error.code === 'NOT_AUTHORIZED') {
       stopGps();
       $('gps-error').replaceChildren(
-        'Aplicația nu are acces la locație. ',
+        'Locația telefonului este oprită sau aplicația nu are acces la ea. ',
         el('button', { class: 'btn btn-sm', type: 'button', onclick: () => BackgroundGeolocation.openSettings() }, 'Deschide setările')
       );
     } else {
@@ -715,6 +768,7 @@
   }
 
   async function stopGps() {
+    if (gpsOn) reportGpsOff();
     if (watchId !== null) navigator.geolocation.clearWatch(watchId);
     watchId = null;
     if (watcherId !== null) {
@@ -741,6 +795,7 @@
     };
     $('gps-error').textContent = '';
     showOwnPosition();
+    renderGpsState();
     if (NATIVE) sendNativeLocation();
     else if (Date.now() - lastSentAt >= SEND_INTERVAL_MS) sendLocation(false);
   }
@@ -753,6 +808,20 @@
     };
     $('gps-error').textContent = messages[err.code] || 'Eroare GPS: ' + err.message;
     if (err.code === 1) stopGps();
+    // Locația telefonului e oprită: dispeceratul află imediat (prima poziție nouă anulează semnalul).
+    else if (err.code === 2) reportGpsOff();
+  }
+
+  /** Anunță serverul că GPS-ul s-a oprit: mașina nu mai primește comenzi, iar dispecerul este avertizat. */
+  function reportGpsOff() {
+    if (!session) return;
+    if (NATIVE) request('POST', '/api/driver/gps-off', {}, session.token).catch(() => {});
+    else if (socket && socket.connected) socket.emit('gps:off', {});
+  }
+
+  /** De cât timp are telefonul poziția (serverul nu ia o poziție veche drept semnal GPS). */
+  function fixAge(fix) {
+    return Math.max(0, Date.now() - fix.ts);
   }
 
   function showSent(ts) {
@@ -767,7 +836,7 @@
     if (!force && !gpsOn) return;
     lastSentAt = Date.now();
     const { lat, lng, accuracy, speed, heading } = lastFix;
-    socket.emit('location', { lat, lng, accuracy, speed, heading });
+    socket.emit('location', { lat, lng, accuracy, speed, heading, age: fixAge(lastFix) });
     showSent(lastSentAt);
   }
 
@@ -786,7 +855,7 @@
     const fix = lastFix;
     try {
       const { lat, lng, accuracy, speed, heading } = fix;
-      const res = await request('POST', '/api/driver/location', { lat, lng, accuracy, speed, heading }, session.token);
+      const res = await request('POST', '/api/driver/location', { lat, lng, accuracy, speed, heading, age: fixAge(fix) }, session.token);
       if (res.status === 401) return sessionEnded('Sesiunea a fost închisă (PIN schimbat sau mașină dezactivată). Intrați din nou.');
       if (res.status === 200) {
         lastSent = fix;
@@ -805,6 +874,21 @@
     // O poziție mai veche de 2 minute nu o mai retrimitem ca fiind actuală (ex. semnal pierdut în tunel).
     const fresh = lastFix && Date.now() - lastFix.ts < 2 * 60 * 1000;
     if (gpsOn && fresh && Date.now() - lastSentAt >= HEARTBEAT_MS) sendLocation(false);
+    // Mașina stă pe loc și browserul nu mai dă poziții: cerem una nouă, ca să nu apară „fără GPS”.
+    if (gpsOn && !refreshingFix && (!lastFix || Date.now() - lastFix.ts > FIX_REFRESH_MS)) {
+      refreshingFix = true;
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          refreshingFix = false;
+          if (gpsOn) onPosition(pos);
+        },
+        (err) => {
+          refreshingFix = false;
+          if (gpsOn && err.code !== 3) onGpsError(err);
+        },
+        { enableHighAccuracy: true, maximumAge: 0, timeout: 20000 }
+      );
+    }
   }
 
   function showOwnPosition() {

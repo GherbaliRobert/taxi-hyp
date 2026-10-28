@@ -9,7 +9,7 @@ Aplicație web pentru o firmă de taxi. Arată pe hartă, în timp real, unde se
 | **Flotă** | `/fleet` | administratori | Adaugă și modifică mașini și șoferi, schimbă PIN-uri, dezactivează mașini. |
 | **Utilizatori** | `/users` | administratori | Conturile dispecerilor și administratorilor: adăugare, rol, resetare parolă, dezactivare. |
 | **Jurnal** | `/audit` | administratori | Cine ce a făcut și când: autentificări (inclusiv cele eșuate), comenzi trimise, retrimise și anulate, SMS-uri retrimise, modificări în flotă și conturi, exporturi. |
-| **Șofer** | `/driver` sau **aplicația Android** | șofer, pe telefon (mașină + PIN) | Trimite poziția GPS a telefonului, comută Liber / Ocupat, primește comenzile cu sunet și vibrație și le acceptă sau le refuză, navigare cu Google Maps / Waze, butoane „Am ajuns”, „Client preluat”, „Cursă finalizată”. Aplicația Android transmite poziția **și cu ecranul stins** și anunță comenzile noi prin notificări. |
+| **Șofer** | `/driver` sau **aplicația Android** | șofer, pe telefon (mașină + PIN) | Trimite poziția GPS a telefonului (obligatoriu: fără GPS nu primește comenzi), comută Liber / Ocupat, primește comenzile cu sunet și vibrație și le acceptă sau le refuză, navigare cu Google Maps / Waze, butoane „Am ajuns”, „Client preluat”, „Cursă finalizată”. Aplicația Android transmite poziția **și cu ecranul stins** și anunță comenzile noi prin notificări. |
 | **Client** | `/track/<cod>` | clientul (link primit automat prin SMS) | Vede mașina apropiindu-se pe hartă, distanța și timpul estimat, numărul de înmatriculare, modelul și prenumele șoferului. După încheierea cursei, linkul nu mai funcționează. |
 
 Poziția trimisă de telefonul șoferului ajunge în mai puțin de o secundă la dispecerat și la client (WebSocket).
@@ -18,7 +18,7 @@ Poziția trimisă de telefonul șoferului ajunge în mai puțin de o secundă la
 
 1. **Clientul sună la dispecerat** și spune adresa.
 2. **Dispecerul introduce comanda** (tabul **+ Cursă nouă**): caută adresa sau dă click pe hartă, completează numele și telefonul clientului și alege cui o trimite: tuturor mașinilor libere, celor mai apropiate 3 / 5 sau unei anumite mașini.
-3. **Șoferii primesc comanda** pe telefon, cu sunet, vibrație și (în aplicația Android) notificare. Văd adresa, observațiile, distanța și timpul până la client, dar **nu și numele sau telefonul clientului**. Au 60 de secunde să răspundă.
+3. **Șoferii primesc comanda** (doar cei liberi și [cu GPS-ul pornit](#gps-obligatoriu)) pe telefon, cu sunet, vibrație și (în aplicația Android) notificare. Văd adresa, observațiile, distanța și timpul până la client, dar **nu și numele sau telefonul clientului**. Au 60 de secunde să răspundă.
 4. **Șoferul acceptă sau refuză.** Primul care acceptă primește cursa: mașina lui devine ocupată, iar la ceilalți comanda dispare („preluată de alt coleg”). Abia acum șoferul vede numele și telefonul clientului.
    - Dacă toți refuză sau nu răspunde nimeni, dispecerul vede un avertisment și poate **retrimite** comanda (eventual altor mașini) sau o poate **anula**.
 5. **Clientul primește automat un SMS** cu linkul de urmărire, de exemplu:
@@ -28,7 +28,20 @@ Poziția trimisă de telefonul șoferului ajunge în mai puțin de o secundă la
 6. **Șoferul marchează etapele**: „Am ajuns”, „Client preluat”, „Cursă finalizată”.
 7. **După finalizare (sau anulare), linkul dispare**: pagina deschisă la client arată „Cursa s-a încheiat”, iar la redeschidere linkul arată doar „Linkul nu mai este valabil”.
 
-Trimiterea SMS-urilor reale se configurează în secțiunea [SMS către clienți](#sms-către-clienți). Fără configurare, SMS-ul doar apare în jurnalul serverului (`[sms simulat] către +40…`).
+Trimiterea SMS-urilor reale se configurează în secțiunea [SMS către clienți](#sms-către-clienți).
+
+## GPS obligatoriu
+
+Șoferii lucrează doar cu GPS-ul pornit. Aplicația nu poate împiedica oprirea locației din setările telefonului, dar o observă imediat și are consecințe:
+
+- **Fără GPS nu se primesc comenzi.** O mașină conectată, dar fără o poziție GPS nouă în ultimul minut, nu primește comenzi și nu poate accepta una deja primită. Comenzile deschise i se retrag.
+- **Dispecerul este avertizat.** Mașina apare cu eticheta roșie „Fără GPS”, iar sus apare numărul mașinilor fără GPS. Când o mașină pierde GPS-ul, apare un avertisment, iar în timpul unei curse acesta indică și cursa respectivă. Mașinile fără GPS nu apar în lista „Trimite comanda la”.
+- **Șoferul vede un avertisment roșu** cât timp GPS-ul e oprit sau fără semnal. Aplicația Android îl anunță și printr-o notificare cu sunet.
+- **În timpul unei curse, GPS-ul nu poate fi oprit**: butonul „Oprește GPS” / „Încheie tura” este blocat până la finalizarea cursei.
+- **O poziție veche nu păcălește sistemul.** Telefonul trimite și vârsta fiecărei poziții, deci retrimiterea ultimei poziții cunoscute (ex. cu locația oprită) nu ține mașina „cu GPS”.
+
+Când telefonul raportează că locația e oprită sau accesul la ea refuzat, dispecerul află imediat. Altfel (ex. telefonul nu mai dă poziții într-o parcare subterană), mașina apare „Fără GPS” după un minut.
+ Fără configurare, SMS-ul doar apare în jurnalul serverului (`[sms simulat] către +40…`).
 
 ## Pornire rapidă
 
@@ -60,7 +73,7 @@ Pagina șoferului se poate testa pe același calculator la <http://localhost:300
 
 Pagina `/driver` funcționează în orice browser, dar browserul oprește GPS-ul când ecranul se stinge sau șoferul deschide altă aplicație (ex. Waze). Aplicația Android din [`mobile/`](mobile) rezolvă asta:
 
-- **Transmite poziția și cu ecranul stins** sau din alte aplicații. Cât timp tura e activă, în bara de notificări apare „Tură activă · B 101 TXI”, așa cum cere Android pentru localizarea în fundal.
+- **Transmite poziția și cu ecranul stins** sau din alte aplicații. Cât timp tura e activă, în bara de notificări apare „Tură activă · B 101 TXI”, așa cum cere Android pentru localizarea în fundal. Tura nu se poate încheia în timpul unei curse.
 - **Anunță comenzile noi** (și anulările) printr-o notificare cu sunet, chiar dacă telefonul e în buzunar. Cu aplicația deschisă, comanda apare direct pe ecran, cu butoanele **Accept** și **Refuz**.
 - **Are aceeași interfață** ca pagina web: aplicația conține pagina șoferului, deci orice îmbunătățire a ei ajunge în ambele.
 - **Păstrează doar un token de sesiune**, nu PIN-ul. Un PIN nou sau dezactivarea mașinii închide tura pe telefon.
@@ -248,7 +261,7 @@ docker run -d --restart unless-stopped -p 3000:3000 -e ADMIN_PASSWORD='o-parola-
 npx cloudflared tunnel --url http://localhost:3000
 ```
 
-**Important pentru șoferii care folosesc pagina web** (nu aplicația Android): pagina trebuie să rămână deschisă pe ecran în timpul turei. Browserele de pe telefon opresc GPS-ul când pagina trece în fundal sau ecranul se stinge (pagina cere ca ecranul să rămână aprins acolo unde browserul permite). Aplicația Android nu are această limitare.
+**Important pentru șoferii care folosesc pagina web** (nu aplicația Android): pagina trebuie să rămână deschisă pe ecran în timpul turei. Browserele de pe telefon opresc GPS-ul când pagina trece în fundal sau ecranul se stinge (pagina cere ca ecranul să rămână aprins acolo unde browserul permite). Cum GPS-ul e obligatoriu, șoferul apare atunci „Fără GPS” și nu primește comenzi. Aplicația Android nu are această limitare.
 
 ## Cum funcționează
 
@@ -280,6 +293,7 @@ Testele verifică:
 
 - logica flotei și a curselor, baza de date (inclusiv repornirea serverului în timpul unei curse), istoricul și statisticile;
 - comenzile: trimiterea la mașinile libere / cele mai apropiate, primul care acceptă câștigă, refuzul, expirarea, retrimiterea, anularea, linkul valabil doar cât durează cursa;
+- GPS-ul obligatoriu: fără poziții recente (sau cu GPS-ul oprit de șofer) mașina nu primește și nu poate accepta comenzi, iar o poziție veche retrimisă nu contează;
 - SMS-ul: formatul numerelor, textul de maxim 160 de caractere, cererile către SMSGate și Twilio, erorile furnizorului;
 - conturile: autentificare, expirarea sesiunilor, parole temporare, roluri, protecția ultimului administrator;
 - un flux complet prin WebSocket și API (comandă → acceptare → SMS → link → finalizare), inclusiv doi șoferi care acceptă simultan: drepturi pe roluri, cereri respinse de pe alte site-uri, deconectarea la dezactivare și la ieșire, conținutul jurnalului;

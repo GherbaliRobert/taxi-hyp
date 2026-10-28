@@ -318,6 +318,7 @@ function createApp(config) {
     socket.on('offer:decline', (data, ack) => reply(ack, store.declineOffer(data && data.rideId, carId)));
 
     socket.on('location', (data, ack) => reply(ack, store.updateLocation(carId, data)));
+    socket.on('gps:off', (data, ack) => reply(ack, store.gpsLost(carId)));
 
     socket.on('status', (data, ack) => {
       reply(ack, store.setCarStatus(carId, data && data.status));

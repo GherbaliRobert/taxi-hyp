@@ -24,9 +24,16 @@ function setup() {
   return { store, clock, repo, restart };
 }
 
+/** Telefonul șoferului trimite o poziție proaspătă: fără GPS mașina nu primește comenzi. */
+function gpsFix(store, carId, at = { lat: 44.42, lng: 26.1 }) {
+  const car = store.getCarView(carId);
+  if (car && !car.gpsOk) store.updateLocation(carId, car.position || at);
+}
+
 /** Comandă trimisă unei mașini și acceptată de șoferul ei (dispecer → șofer). */
 function newRide(store, overrides = {}, actor) {
   const { carId = 'a', ...fields } = overrides;
+  gpsFix(store, carId);
   const order = store.createOrder(
     { customerName: 'Ana', phone: '0722', address: 'Str. X 1', pickup: PICKUP, target: { mode: 'car', carId }, ...fields },
     actor
@@ -438,8 +445,10 @@ test('emite evenimente la schimbări', () => {
   store.on('car', (c) => events.push(['car', c.id, c.status]));
   store.on('ride', (r) => events.push(['ride', r.id, r.status]));
   store.driverConnected('a');
+  store.updateLocation('a', { lat: 44.42, lng: 26.1 });
   newRide(store);
   assert.deepEqual(events, [
+    ['car', 'a', 'free'],
     ['car', 'a', 'free'],
     ['ride', '1', 'pending'],
     ['car', 'a', 'busy'],

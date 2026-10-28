@@ -22,7 +22,7 @@ function createDriverApi({ store, limiter }) {
     const ride = store.driverRide(carId);
     const offers = store.carOffers(carId).map(({ offer, ride: order }) => offerViewForDriver(offer, order, car, store.avgSpeedKmh));
     return {
-      car: { id: car.id, plate: car.plate, status: car.status, rideId: car.rideId },
+      car: { id: car.id, plate: car.plate, status: car.status, rideId: car.rideId, gpsOk: car.gpsOk },
       ride: ride ? rideViewForDriver(ride) : null,
       offers,
     };
@@ -57,6 +57,12 @@ function createDriverApi({ store, limiter }) {
     const result = store.updateLocation(req.carId, req.body);
     if (!result.ok) return res.status(400).json(result);
     // Răspunsul conține și cursa curentă: așa află aplicația de o cursă nouă chiar din fundal.
+    res.json({ ok: true, ...driverState(req.carId) });
+  });
+
+  // Șoferul a încheiat tura sau telefonul nu mai are acces la locație: mașina nu mai primește comenzi.
+  router.post('/gps-off', (req, res) => {
+    store.gpsLost(req.carId);
     res.json({ ok: true, ...driverState(req.carId) });
   });
 

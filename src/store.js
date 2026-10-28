@@ -39,6 +39,10 @@ const ODOMETER_MAX_SPEED_MS = 60; // ~216 km/h
 // Aplicația de telefon trimite poziția prin HTTP (și din fundal): mașina e „conectată”
 // cât timp a trimis ceva în ultimul minut, chiar dacă WebSocket-ul e întrerupt.
 const HTTP_PRESENCE_MS = 60 * 1000;
+// GPS-ul este obligatoriu: o mașină fără o poziție GPS mai nouă de un minut nu primește comenzi.
+const GPS_LOST_MS = 60 * 1000;
+// Vârsta maximă acceptată pentru o poziție raportată de telefon (poziția retrimisă fără semnal nou).
+const MAX_FIX_AGE_MS = 10 * 60 * 1000;
 // Sesiunea șoferului expiră după 30 de zile fără activitate.
 const DRIVER_SESSION_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
 const DRIVER_SESSION_TOUCH_MS = 10 * 60 * 1000;
@@ -78,6 +82,7 @@ function importCars(repo, cars, now = Date.now()) {
  * conexiunile și pozițiile live sunt ținute în memorie.
  * Emite 'car' (mașina s-a schimbat), 'ride' (cursa s-a schimbat) și
  * 'car:revoked' (sesiunile șoferului trebuie închise: PIN schimbat sau mașină dezactivată).
+ * O mașină primește comenzi doar dacă e liberă, conectată și cu GPS-ul funcțional (vezi _gpsOk).
  */
 class FleetStore extends EventEmitter {
   constructor({ repo, avgSpeedKmh = 25, offerTimeoutMs = DEFAULT_OFFER_TIMEOUT_MS, now = Date.now }) {
@@ -119,6 +124,9 @@ class FleetStore extends EventEmitter {
       httpSeenAt: 0,
       rideId: null,
       position: record.lastPosition,
+      // Șoferul a oprit GPS-ul sau telefonul a raportat că locația nu e disponibilă.
+      gpsOff: false,
+      gpsWasOk: false,
       trail: [],
       lastSeen: record.lastPosition ? record.lastPosition.ts : null,
       lastSavedAt: 0,
@@ -167,6 +175,7 @@ class FleetStore extends EventEmitter {
       status: car.status,
       rideId: car.rideId,
       position: car.position,
+      gpsOk: this._gpsOk(car),
       lastSeen: car.lastSeen,
     };
     if (withTrail) view.trail = car.trail.slice();
@@ -357,6 +366,7 @@ class FleetStore extends EventEmitter {
     } else {
       return false;
     }
+    this._refreshGps(car, false);
     this.emit('car', car);
     return true;
   }
@@ -370,11 +380,36 @@ class FleetStore extends EventEmitter {
     this._updatePresence(car);
   }
 
-  /** Rulat periodic: mașinile care nu mai trimit nimic devin „deconectate”. */
+  /** Rulat periodic: mașinile care nu mai trimit nimic devin „deconectate”, cele fără poziții noi „fără GPS”. */
   sweepPresence() {
     for (const car of this.cars.values()) {
-      if (car.status !== 'offline') this._updatePresence(car);
+      if (car.status !== 'offline' && !this._updatePresence(car)) this._refreshGps(car);
     }
+  }
+
+  // ---- GPS (obligatoriu pentru a primi comenzi) ----
+
+  _gpsOk(car) {
+    return car.status !== 'offline' && !car.gpsOff && Boolean(car.position) && this.now() - car.position.ts <= GPS_LOST_MS;
+  }
+
+  /** Recalculează starea GPS-ului; la pierderea lui, ofertele deschise ale mașinii se retrag. */
+  _refreshGps(car, emit = true) {
+    const ok = this._gpsOk(car);
+    if (ok === car.gpsWasOk) return false;
+    car.gpsWasOk = ok;
+    if (!ok) this._withdrawCarOffers(car.id);
+    if (emit) this.emit('car', car);
+    return true;
+  }
+
+  /** Șoferul a oprit GPS-ul (sau telefonul nu mai are acces la locație). */
+  gpsLost(carId) {
+    const car = this.cars.get(carId);
+    if (!car) return { ok: false, error: 'Mașină necunoscută' };
+    car.gpsOff = true;
+    this._refreshGps(car);
+    return { ok: true };
   }
 
   driverConnected(carId) {
@@ -385,6 +420,7 @@ class FleetStore extends EventEmitter {
       car.status = car.rideId ? 'busy' : 'free';
     }
     car.lastSeen = this.now();
+    this._refreshGps(car, false);
     this.emit('car', car);
   }
 
@@ -395,17 +431,28 @@ class FleetStore extends EventEmitter {
     this._updatePresence(car);
   }
 
+  /**
+   * Poziția GPS a telefonului. `age` (ms) = de cât timp are telefonul această poziție: o poziție veche
+   * retrimisă (ex. GPS oprit, fără semnal) ține mașina conectată, dar nu și „cu GPS”.
+   */
   updateLocation(carId, data) {
     const car = this.cars.get(carId);
     if (!car) return { ok: false, error: 'Mașină necunoscută' };
     if (!data || !Geo.isValidLatLng(data.lat, data.lng)) {
       return { ok: false, error: 'Coordonate invalide' };
     }
-    const ts = this.now();
+    const age = Math.min(Math.max(optionalNumber(data.age) || 0, 0), MAX_FIX_AGE_MS);
+    const ts = this.now() - Math.round(age);
     const previous = car.position;
     if (previous && ts - previous.ts < MIN_LOCATION_INTERVAL_MS) {
+      // Prea curând după poziția anterioară: nu o înregistrăm, dar arată că GPS-ul a repornit.
+      if (car.gpsOff && age <= GPS_LOST_MS) {
+        car.gpsOff = false;
+        this._refreshGps(car);
+      }
       return { ok: true, ignored: true };
     }
+    car.gpsOff = false;
 
     let heading = optionalNumber(data.heading);
     if (heading === null && previous) {
@@ -422,7 +469,7 @@ class FleetStore extends EventEmitter {
       accuracy: optionalNumber(data.accuracy), // metri
       ts,
     };
-    car.lastSeen = ts;
+    car.lastSeen = this.now();
     car.trail.push([data.lat, data.lng]);
     if (car.trail.length > TRAIL_LENGTH) car.trail.shift();
 
@@ -431,6 +478,7 @@ class FleetStore extends EventEmitter {
       this.repo.saveCarPosition(car.id, car.position);
       car.lastSavedAt = ts;
     }
+    this._refreshGps(car, false);
     this.emit('car', car);
     return { ok: true };
   }
@@ -498,14 +546,15 @@ class FleetStore extends EventEmitter {
       const car = this.cars.get(target.carId);
       if (!car || !car.active) return { error: 'Mașină inexistentă' };
       if (car.status !== 'free' || car.rideId) return { error: `Mașina ${car.plate} nu este liberă` };
+      if (!this._gpsOk(car)) return { error: `Mașina ${car.plate} nu are GPS-ul pornit` };
       return { mode: 'car', carId: target.carId };
     }
     return { error: 'Alegeți cui trimiteți comanda' };
   }
 
-  /** Mașinile libere și conectate, cele mai apropiate de client primele. */
+  /** Mașinile libere, conectate și cu GPS, cele mai apropiate de client primele. */
   _offerCandidates(ride, target) {
-    const free = this._activeCars().filter((c) => c.status === 'free' && !c.rideId);
+    const free = this._activeCars().filter((c) => c.status === 'free' && !c.rideId && this._gpsOk(c));
     if (target.mode === 'car') return free.filter((c) => c.id === target.carId);
     const byDistance = free
       .map((car) => ({ car, distance: car.position ? Geo.distanceMeters(car.position, ride.pickup) : Infinity }))
@@ -617,6 +666,7 @@ class FleetStore extends EventEmitter {
     if (!ride || ride.status !== 'pending') {
       return { ok: false, error: ride ? 'Comanda a fost preluată de alt coleg' : 'Comanda nu mai este disponibilă' };
     }
+    if (!this._gpsOk(car)) return { ok: false, error: 'Porniți GPS-ul ca să acceptați comanda' };
     const offer = this._openOffer(ride.id, carId);
     if (!offer) return { ok: false, error: 'Oferta a expirat' };
     if (car.status !== 'free' || car.rideId) return { ok: false, error: 'Mașina nu este liberă' };

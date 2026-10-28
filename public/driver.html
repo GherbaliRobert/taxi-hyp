@@ -50,13 +50,15 @@
     </header>
 
     <main class="driver-main">
-      <section class="card">
+      <section class="card gps-card" id="gps-card" data-gps="off">
         <div class="gps-line">
           <strong>Locație GPS</strong>
           <span class="hint" id="gps-info">Oprită</span>
         </div>
+        <p class="gps-warning" id="gps-warning" role="alert">GPS-ul este obligatoriu: cât timp este oprit nu primiți comenzi.</p>
         <p class="error-text collapse" id="gps-error"></p>
         <button class="btn btn-lg btn-primary" id="gps-toggle" type="button">Pornește GPS</button>
+        <p class="hint" id="gps-lock" hidden>GPS-ul rămâne pornit până la finalizarea cursei.</p>
         <p class="hint" id="gps-hint" style="margin-bottom:0">Păstrați pagina deschisă pe ecran cât sunteți în tură, ca dispeceratul și clienții să vă vadă poziția.</p>
         <p class="hint native-only" style="margin-bottom:0">Pe unele telefoane (Samsung, Xiaomi, Huawei), dezactivați „optimizarea bateriei” pentru această aplicație, altfel sistemul o poate opri în timpul turei.</p>
       </section>

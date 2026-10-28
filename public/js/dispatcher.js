@@ -151,7 +151,14 @@
       return;
     }
     const prev = upsertCar(car);
-    if (!prev || prev.status !== car.status || prev.rideId !== car.rideId) {
+    // GPS-ul e obligatoriu: dispecerul află imediat când o mașină conectată îl pierde.
+    if (prev && prev.gpsOk && !car.gpsOk && car.status !== 'offline') {
+      UI.toast(
+        car.plate + ' (' + car.driver + '): GPS oprit' + (car.rideId ? ' în timpul cursei #' + car.rideId : ' — nu primește comenzi'),
+        'error'
+      );
+    }
+    if (!prev || prev.status !== car.status || prev.rideId !== car.rideId || prev.gpsOk !== car.gpsOk) {
       renderCarList();
       if (activeTab === 'new') refreshTargetSelect();
     } else {
@@ -210,6 +217,11 @@
     if (selectedCarId === id) selectedCarId = null;
   }
 
+  /** Mașină conectată, dar fără poziții GPS recente: nu primește comenzi. */
+  function noGps(car) {
+    return car.status !== 'offline' && (!car.gpsOk || UI.isStale(car.position));
+  }
+
   function statusColor(status) {
     return { free: '#16a34a', busy: '#ea580c' }[status] || '#9aa1ac';
   }
@@ -223,6 +235,7 @@
       el('strong', {}, car.plate),
       el('div', {}, car.driver + (car.model ? ' · ' + car.model : '')),
       el('div', {}, 'Status: ' + UI.CAR_STATUS_LABELS[car.status] + (car.rideId ? ' (cursa #' + car.rideId + ')' : '')),
+      noGps(car) ? el('div', { class: 'error-text' }, 'GPS oprit: nu primește comenzi') : null,
       el('div', {}, 'Viteză: ' + speed),
       el('div', {}, 'Ultima poziție: ' + (pos ? UI.timeAgo(pos.ts) : 'niciodată'))
     );
@@ -234,9 +247,12 @@
         STATUS_ORDER[a.data.status] - STATUS_ORDER[b.data.status] ||
         a.data.plate.localeCompare(b.data.plate)
     );
-    const counts = { free: 0, busy: 0, offline: 0 };
+    const counts = { free: 0, busy: 0, offline: 0, noGps: 0 };
     const items = list.map((entry) => {
-      counts[entry.data.status] += 1;
+      // „Libere” = pot primi comenzi acum; cele fără GPS se numără separat.
+      if (entry.data.status === 'free' && noGps(entry.data)) counts.noGps += 1;
+      else counts[entry.data.status] += 1;
+      if (entry.data.status === 'busy' && noGps(entry.data)) counts.noGps += 1;
       entry.row = buildCarRow(entry);
       return entry.row.root;
     });
@@ -244,6 +260,8 @@
     $('sum-free').textContent = counts.free;
     $('sum-busy').textContent = counts.busy;
     $('sum-offline').textContent = counts.offline;
+    $('sum-nogps').textContent = counts.noGps;
+    $('sum-nogps-item').classList.toggle('warn', counts.noGps > 0);
     $('count-cars').textContent = counts.free + counts.busy;
   }
 
@@ -275,12 +293,10 @@
   }
 
   function fillCarRow(row, car) {
-    const stale = car.status !== 'offline' && UI.isStale(car.position);
+    const stale = noGps(car);
     row.badge.dataset.status = car.status;
     row.badge.classList.toggle('stale', stale);
-    row.badge.textContent = stale
-      ? 'Fără semnal'
-      : UI.CAR_STATUS_LABELS[car.status] + (car.rideId ? ' #' + car.rideId : '');
+    row.badge.textContent = (stale ? 'Fără GPS' : UI.CAR_STATUS_LABELS[car.status]) + (car.rideId ? ' #' + car.rideId : '');
     row.time.textContent = car.position ? UI.timeAgo(car.position.ts) : 'fără poziție';
   }
 
@@ -596,12 +612,12 @@
     const previous = select.value;
     const free = [...cars.values()]
       .map((e) => e.data)
-      .filter((c) => c.status === 'free')
+      .filter((c) => c.status === 'free' && !noGps(c))
       .map((c) => ({ car: c, distance: pickup && c.position ? Geo.distanceMeters(c.position, pickup) : Infinity }))
       .sort((a, b) => a.distance - b.distance || a.car.plate.localeCompare(b.car.plate));
 
     const options = [
-      el('option', { value: 'all' }, free.length ? 'Toate mașinile libere (' + free.length + ')' : 'Nicio mașină liberă acum — comanda va aștepta'),
+      el('option', { value: 'all' }, free.length ? 'Toate mașinile libere (' + free.length + ')' : 'Nicio mașină liberă cu GPS acum — comanda va aștepta'),
     ];
     for (const count of [3, 5]) {
       if (free.length > count) options.push(el('option', { value: 'nearest:' + count }, 'Cele mai apropiate ' + count + ' mașini'));
