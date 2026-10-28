@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#17191d">
+  <title>Șofer Taxi</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div id="login" class="login" hidden>
+    <form class="login-card" id="login-form">
+      <div class="brand"><div class="brand-logo">TX</div><span class="company-name">Taxi</span></div>
+      <h1>Aplicația șoferului</h1>
+      <p class="hint">Alegeți mașina și introduceți PIN-ul primit de la dispecerat.</p>
+      <div class="field">
+        <label for="car-select">Mașina</label>
+        <select class="input" id="car-select" required></select>
+      </div>
+      <div class="field">
+        <label for="pin">PIN</label>
+        <input class="input" id="pin" type="password" inputmode="numeric" autocomplete="current-password" required>
+      </div>
+      <p class="error-text" id="login-error"></p>
+      <button class="btn btn-primary btn-block" type="submit">Intră în tură</button>
+    </form>
+  </div>
+
+  <div id="app" hidden>
+    <header class="topbar">
+      <div class="brand"><div class="brand-logo">TX</div><span id="car-plate"></span></div>
+      <div class="spacer"></div>
+      <span class="conn" id="conn"></span>
+      <button class="btn btn-sm btn-ghost" id="logout" type="button">Ieșire</button>
+    </header>
+
+    <main class="driver-main">
+      <section class="card">
+        <div class="gps-line">
+          <strong>Locație GPS</strong>
+          <span class="hint" id="gps-info">Oprită</span>
+        </div>
+        <p class="error-text collapse" id="gps-error"></p>
+        <button class="btn btn-lg btn-primary" id="gps-toggle" type="button">Pornește GPS</button>
+        <p class="hint" style="margin-bottom:0">Păstrați pagina deschisă pe ecran cât sunteți în tură, ca dispeceratul și clienții să vă vadă poziția.</p>
+      </section>
+
+      <section class="card ride-card" id="ride-card" hidden></section>
+
+      <div class="status-toggle" id="status-toggle">
+        <button type="button" data-status="free" aria-pressed="false">Liber</button>
+        <button type="button" data-status="busy" aria-pressed="false">Ocupat</button>
+      </div>
+
+      <div class="driver-map" id="map"></div>
+    </main>
+  </div>
+
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/shared/geo.js"></script>
+  <script src="/js/common.js"></script>
+  <script src="/js/driver.js"></script>
+</body>
+</html>

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dispecerat Taxi</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div id="login" class="login" hidden>
+    <form class="login-card" id="login-form">
+      <div class="brand"><div class="brand-logo">TX</div><span class="company-name">Taxi</span></div>
+      <h1>Dispecerat</h1>
+      <p class="hint">Introduceți parola dispeceratului pentru a vedea flota.</p>
+      <div class="field">
+        <label for="password">Parolă</label>
+        <input class="input" id="password" type="password" autocomplete="current-password" required>
+      </div>
+      <p class="error-text" id="login-error"></p>
+      <button class="btn btn-primary btn-block" type="submit">Intră</button>
+    </form>
+  </div>
+
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-logo">TX</div>
+        <span class="company-name">Taxi</span>
+        <span class="hide-mobile" style="font-weight:400;opacity:.65">· Dispecerat</span>
+      </div>
+      <div class="spacer"></div>
+      <span class="conn" id="conn"></span>
+      <button class="btn btn-sm btn-ghost" id="logout" type="button">Ieșire</button>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="tabs" role="tablist">
+          <button class="tab" role="tab" type="button" data-tab="cars" aria-selected="true">Mașini<span class="count" id="count-cars">0</span></button>
+          <button class="tab" role="tab" type="button" data-tab="rides" aria-selected="false">Curse<span class="count" id="count-rides">0</span></button>
+          <button class="tab" role="tab" type="button" data-tab="new" aria-selected="false">+ Cursă nouă</button>
+        </div>
+
+        <section class="panel" id="panel-cars">
+          <div class="summary">
+            <div class="summary-item"><strong id="sum-free">0</strong><span>Libere</span></div>
+            <div class="summary-item"><strong id="sum-busy">0</strong><span>Ocupate</span></div>
+            <div class="summary-item"><strong id="sum-offline">0</strong><span>Deconectate</span></div>
+          </div>
+          <ul class="list" id="car-list"></ul>
+        </section>
+
+        <section class="panel" id="panel-rides" hidden>
+          <div id="ride-list"></div>
+        </section>
+
+        <section class="panel" id="panel-new" hidden>
+          <form id="ride-form" novalidate>
+            <div class="field">
+              <label for="ride-address">Adresa de preluare</label>
+              <div class="row">
+                <input class="input grow" id="ride-address" maxlength="200" placeholder="ex. Calea Victoriei 12">
+                <button class="btn" id="geocode" type="button">Caută</button>
+              </div>
+            </div>
+            <div class="field">
+              <div class="pickup-status" id="pickup-status">Căutați adresa sau faceți click pe hartă pentru a alege locul de preluare.</div>
+            </div>
+            <div class="field">
+              <label for="ride-name">Nume client</label>
+              <input class="input" id="ride-name" maxlength="80" required autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="ride-phone">Telefon client</label>
+              <input class="input" id="ride-phone" type="tel" maxlength="30" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="ride-notes">Observații pentru șofer</label>
+              <input class="input" id="ride-notes" maxlength="300" placeholder="ex. bagaje, scaun copil" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="ride-car">Mașina</label>
+              <select class="input" id="ride-car"></select>
+              <span class="hint">Mașinile libere, ordonate după distanța până la client.</span>
+            </div>
+            <p class="error-text" id="ride-error"></p>
+            <button class="btn btn-primary btn-block" type="submit">Trimite cursa</button>
+          </form>
+          <div id="ride-result" hidden></div>
+        </section>
+      </aside>
+
+      <main class="map" id="map"></main>
+    </div>
+  </div>
+
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/shared/geo.js"></script>
+  <script src="/js/common.js"></script>
+  <script src="/js/dispatcher.js"></script>
+</body>
+</html>

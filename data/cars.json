@@ -1,0 +1,7 @@
+[
+  { "id": "taxi-01", "plate": "B 101 TXI", "model": "Dacia Logan", "driver": "Ion Popescu", "pin": "1111" },
+  { "id": "taxi-02", "plate": "B 102 TXI", "model": "Skoda Octavia", "driver": "Maria Ionescu", "pin": "2222" },
+  { "id": "taxi-03", "plate": "B 103 TXI", "model": "Toyota Corolla", "driver": "Andrei Stan", "pin": "3333" },
+  { "id": "taxi-04", "plate": "B 104 TXI", "model": "Dacia Logan", "driver": "Elena Dumitru", "pin": "4444" },
+  { "id": "taxi-05", "plate": "B 105 TXI", "model": "Hyundai Ioniq", "driver": "Mihai Georgescu", "pin": "5555" }
+]

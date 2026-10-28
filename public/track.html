@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#17191d">
+  <meta name="robots" content="noindex">
+  <title>Taxiul dvs.</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="track" id="track">
+    <header class="topbar">
+      <div class="brand"><div class="brand-logo">TX</div><span class="company-name">Taxi</span></div>
+      <div class="spacer"></div>
+      <span class="conn" id="conn"></span>
+    </header>
+    <div class="map" id="map"></div>
+    <section class="track-card">
+      <p class="track-status" id="status">Se încarcă…</p>
+      <p class="track-eta" id="eta"></p>
+      <div class="track-car" id="car" hidden>
+        <span class="plate-tag" id="plate"></span>
+        <div class="grow">
+          <div id="model"></div>
+          <div class="hint" id="driver"></div>
+        </div>
+        <button class="btn btn-sm" id="recenter" type="button" hidden>Centrează</button>
+      </div>
+    </section>
+  </div>
+
+  <div class="track-message" id="message" hidden>
+    <h1 id="message-title"></h1>
+    <p class="hint" id="message-text"></p>
+  </div>
+
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/shared/geo.js"></script>
+  <script src="/js/common.js"></script>
+  <script src="/js/track.js"></script>
+</body>
+</html>

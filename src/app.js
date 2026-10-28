@@ -1,0 +1,223 @@
+const http = require('http');
+const path = require('path');
+const crypto = require('crypto');
+const express = require('express');
+const { Server } = require('socket.io');
+const { FleetStore } = require('./store');
+
+const PUBLIC_DIR = path.join(__dirname, '..', 'public');
+const SHARED_DIR = path.join(__dirname, '..', 'shared');
+const LEAFLET_DIR = path.dirname(require.resolve('leaflet/dist/leaflet.js'));
+
+// Limită pentru încercări greșite de autentificare (parolă dispecer / PIN șofer), per IP.
+const AUTH_WINDOW_MS = 10 * 60 * 1000;
+const AUTH_MAX_FAILURES = 20;
+
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+}
+
+function createAuthLimiter(now = Date.now) {
+  const failures = new Map();
+  return {
+    blocked(key) {
+      const entry = failures.get(key);
+      if (!entry) return false;
+      if (now() > entry.resetAt) {
+        failures.delete(key);
+        return false;
+      }
+      return entry.count >= AUTH_MAX_FAILURES;
+    },
+    fail(key) {
+      const entry = failures.get(key);
+      if (!entry || now() > entry.resetAt) {
+        failures.set(key, { count: 1, resetAt: now() + AUTH_WINDOW_MS });
+      } else {
+        entry.count += 1;
+      }
+    },
+  };
+}
+
+function rideViewForDispatcher(ride, store) {
+  const car = store.getCarView(ride.carId);
+  return {
+    id: ride.id,
+    customerName: ride.customerName,
+    phone: ride.phone,
+    address: ride.address,
+    notes: ride.notes,
+    pickup: ride.pickup,
+    carId: ride.carId,
+    carPlate: car ? car.plate : ride.carId,
+    status: ride.status,
+    createdAt: ride.createdAt,
+    updatedAt: ride.updatedAt,
+    statusTimes: ride.statusTimes,
+    trackPath: `/track/${ride.token}`,
+  };
+}
+
+function rideViewForDriver(ride) {
+  return {
+    id: ride.id,
+    customerName: ride.customerName,
+    phone: ride.phone,
+    address: ride.address,
+    notes: ride.notes,
+    pickup: ride.pickup,
+    status: ride.status,
+    createdAt: ride.createdAt,
+  };
+}
+
+function reply(ack, payload) {
+  if (typeof ack === 'function') ack(payload);
+}
+
+function createApp(config) {
+  const store = new FleetStore({ cars: config.cars, avgSpeedKmh: config.avgSpeedKmh });
+  const limiter = createAuthLimiter();
+
+  const app = express();
+  app.disable('x-powered-by');
+  if (config.trustProxy) app.set('trust proxy', true);
+  app.use((req, res, next) => {
+    res.set('X-Content-Type-Options', 'nosniff');
+    // Linkul de urmărire conține un token secret: nu-l trimitem altor site-uri (ex. serverul de hărți).
+    res.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+  });
+
+  app.get('/health', (req, res) => res.json({ ok: true }));
+  app.get('/api/config', (req, res) =>
+    res.json({
+      companyName: config.companyName,
+      mapCenter: config.mapCenter,
+      mapZoom: config.mapZoom,
+      geocodeCountry: config.geocodeCountry,
+    })
+  );
+  app.get('/api/cars', (req, res) => res.json(store.carDirectory()));
+  app.get('/driver', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'driver.html')));
+  app.get('/track/:token', (req, res) => res.sendFile(path.join(PUBLIC_DIR, 'track.html')));
+  app.use('/vendor/leaflet', express.static(LEAFLET_DIR));
+  app.use('/shared', express.static(SHARED_DIR));
+  app.use(express.static(PUBLIC_DIR));
+
+  const httpServer = http.createServer(app);
+  const io = new Server(httpServer);
+
+  function clientKey(socket) {
+    if (config.trustProxy) {
+      const forwarded = socket.handshake.headers['x-forwarded-for'];
+      if (typeof forwarded === 'string' && forwarded) return forwarded.split(',')[0].trim();
+    }
+    return socket.handshake.address;
+  }
+
+  io.use((socket, next) => {
+    const auth = socket.handshake.auth || {};
+    const key = clientKey(socket);
+
+    if (auth.role === 'track') {
+      const ride = store.getRideByToken(auth.token);
+      if (!ride) return next(new Error('not_found'));
+      socket.data = { role: 'track', rideId: ride.id };
+      return next();
+    }
+
+    if (limiter.blocked(key)) return next(new Error('too_many_attempts'));
+    if (auth.role === 'dispatcher' && safeEqual(auth.password, config.dispatcherPassword)) {
+      socket.data = { role: 'dispatcher' };
+      return next();
+    }
+    if (auth.role === 'driver' && store.verifyDriver(auth.carId, auth.pin)) {
+      socket.data = { role: 'driver', carId: auth.carId };
+      return next();
+    }
+    limiter.fail(key);
+    return next(new Error('unauthorized'));
+  });
+
+  io.on('connection', (socket) => {
+    const { role } = socket.data;
+    if (role === 'dispatcher') onDispatcher(socket);
+    else if (role === 'driver') onDriver(socket);
+    else if (role === 'track') onTracker(socket);
+    else socket.disconnect(true);
+  });
+
+  function onDispatcher(socket) {
+    socket.join('dispatchers');
+    socket.emit('fleet:snapshot', {
+      cars: store.listCars(),
+      rides: store.listRides().map((r) => rideViewForDispatcher(r, store)),
+    });
+
+    socket.on('ride:create', (data, ack) => {
+      const result = store.createRide(data);
+      reply(ack, result.ok ? { ok: true, ride: rideViewForDispatcher(result.ride, store) } : result);
+    });
+
+    socket.on('ride:status', (data, ack) => {
+      const { rideId, status } = data || {};
+      const result = store.updateRideStatus(rideId, status, { role: 'dispatcher' });
+      reply(ack, result.ok ? { ok: true } : result);
+    });
+  }
+
+  function onDriver(socket) {
+    const { carId } = socket.data;
+    socket.join(`car:${carId}`);
+    store.driverConnected(carId);
+
+    const car = store.getCarView(carId);
+    const ride = car.rideId ? store.getRide(car.rideId) : null;
+    socket.emit('driver:init', { car, ride: ride ? rideViewForDriver(ride) : null });
+
+    socket.on('location', (data, ack) => reply(ack, store.updateLocation(carId, data)));
+
+    socket.on('status', (data, ack) => {
+      reply(ack, store.setCarStatus(carId, data && data.status));
+    });
+
+    socket.on('ride:status', (data, ack) => {
+      const { rideId, status } = data || {};
+      const result = store.updateRideStatus(rideId, status, { role: 'driver', carId });
+      reply(ack, result.ok ? { ok: true } : result);
+    });
+
+    socket.on('disconnect', () => store.driverDisconnected(carId));
+  }
+
+  function onTracker(socket) {
+    const ride = store.getRide(socket.data.rideId);
+    if (!ride) return socket.disconnect(true);
+    socket.join(`ride:${ride.id}`);
+    socket.emit('track:update', store.trackingView(ride));
+  }
+
+  store.on('car', (car) => {
+    const view = store.carView(car);
+    io.to('dispatchers').emit('car:update', view);
+    io.to(`car:${car.id}`).emit('car:update', view);
+    if (car.rideId) {
+      const ride = store.getRide(car.rideId);
+      if (ride) io.to(`ride:${ride.id}`).emit('track:update', store.trackingView(ride));
+    }
+  });
+
+  store.on('ride', (ride) => {
+    io.to('dispatchers').emit('ride:update', rideViewForDispatcher(ride, store));
+    io.to(`car:${ride.carId}`).emit('ride:update', rideViewForDriver(ride));
+    io.to(`ride:${ride.id}`).emit('track:update', store.trackingView(ride));
+  });
+
+  return { app, httpServer, io, store };
+}
+
+module.exports = { createApp };
