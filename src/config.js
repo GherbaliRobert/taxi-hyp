@@ -39,7 +39,11 @@ function loadConfig(env = process.env) {
     port: number(env.PORT, 3000),
     companyName: env.COMPANY_NAME || 'Taxi Hyp',
     dispatcherPassword,
-    cars: loadCars(env.CARS_FILE || path.join(__dirname, '..', 'data', 'cars.json')),
+    databaseFile: env.DATABASE_FILE || path.join(__dirname, '..', 'data', 'taxi.db'),
+    // Flota inițială, importată doar la prima pornire (când baza de date nu are mașini).
+    seedCarsFile: env.CARS_FILE || path.join(__dirname, '..', 'data', 'cars.json'),
+    // Câte zile se păstrează traseele GPS ale curselor (cursele rămân oricum în istoric).
+    routeRetentionDays: number(env.ROUTE_RETENTION_DAYS, 180),
     // Centrul inițial al hărții (implicit: București).
     mapCenter: [number(env.MAP_CENTER_LAT, 44.4268), number(env.MAP_CENTER_LNG, 26.1025)],
     mapZoom: number(env.MAP_ZOOM, 13),

@@ -7,7 +7,8 @@ const { createApp } = require('../src/app');
 const CONFIG = {
   companyName: 'Test Taxi',
   dispatcherPassword: 'secret',
-  cars: [
+  databaseFile: ':memory:',
+  seedCars: [
     { id: 'a', plate: 'B 01 AAA', model: 'Logan', driver: 'Ion Popescu', pin: '1111' },
     { id: 'b', plate: 'B 02 BBB', model: 'Octavia', driver: 'Maria Ionescu', pin: '2222' },
   ],
@@ -16,6 +17,7 @@ const CONFIG = {
   geocodeCountry: 'ro',
   avgSpeedKmh: 25,
   trustProxy: false,
+  routeRetentionDays: 180,
 };
 
 let server;
@@ -30,8 +32,7 @@ test.before(async () => {
 
 test.after(async () => {
   sockets.forEach((s) => s.disconnect());
-  server.io.close();
-  await new Promise((resolve) => server.httpServer.close(resolve));
+  await server.close();
 });
 
 function client(auth) {
@@ -202,7 +203,79 @@ test('după prea multe încercări greșite, IP-ul este blocat temporar', async 
     // Chiar și cu parola corectă, cererile sunt refuzate până expiră fereastra.
     assert.equal(await attempt({ role: 'dispatcher', password: 'secret' }), 'too_many_attempts');
   } finally {
-    other.io.close();
-    await new Promise((resolve) => other.httpServer.close(resolve));
+    await other.close();
   }
+});
+
+function api(path, { method = 'GET', body, password = 'secret' } = {}) {
+  return fetch(baseUrl + path, {
+    method,
+    headers: { authorization: `Bearer ${password}`, 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }).then(async (res) => ({ status: res.status, body: await res.json() }));
+}
+
+test('API-ul de istoric cere parola dispeceratului', async () => {
+  assert.equal((await fetch(`${baseUrl}/api/rides`)).status, 401);
+  assert.equal((await api('/api/rides', { password: 'gresit' })).status, 401);
+  assert.equal((await api('/api/fleet', { password: '' })).status, 401);
+});
+
+test('istoricul conține cursele, statisticile și traseul', async () => {
+  const { status, body } = await api('/api/rides?limit=10');
+  assert.equal(status, 200);
+  assert.ok(body.total >= 2);
+  assert.equal(body.stats.total, body.total);
+  const completed = body.rides.find((r) => r.status === 'completed');
+  assert.equal(completed.customerName, 'Ana Pop');
+  assert.equal(completed.carPlate, 'B 01 AAA');
+  assert.equal(completed.driverName, 'Ion Popescu');
+
+  const filtered = await api('/api/rides?status=cancelled&carId=b');
+  assert.deepEqual(filtered.body.rides.map((r) => r.customerName), ['Dan']);
+  assert.equal((await api('/api/rides?q=nimeni')).body.total, 0);
+
+  const route = await api(`/api/rides/${completed.id}/route`);
+  assert.equal(route.status, 200);
+  assert.equal(route.body.ride.id, completed.id);
+  assert.ok(route.body.points.length >= 2);
+  assert.ok(route.body.points.some((p) => p.status === 'in_progress'));
+  assert.equal((await api('/api/rides/999/route')).status, 404);
+});
+
+test('administrarea flotei: adăugare, PIN nou, dezactivare', async () => {
+  const dispatcher = client({ role: 'dispatcher', password: 'secret' });
+  await waitFor(dispatcher, 'fleet:snapshot');
+
+  const invalid = await api('/api/fleet', { method: 'POST', body: { plate: 'B 01 AAA', driver: 'X', pin: '1234' } });
+  assert.equal(invalid.status, 400);
+  assert.match(invalid.body.error, /Există deja/);
+
+  const created = await api('/api/fleet', { method: 'POST', body: { plate: 'B 77 NEW', model: 'Spring', driver: 'Radu Ene', pin: '7777' } });
+  assert.equal(created.status, 201, JSON.stringify(created.body));
+  const id = created.body.car.id;
+  assert.equal('pin' in created.body.car, false);
+  assert.ok((await (await fetch(`${baseUrl}/api/cars`)).json()).some((c) => c.id === id));
+
+  // Șoferul noii mașini se poate conecta imediat.
+  const driver = client({ role: 'driver', carId: id, pin: '7777' });
+  await waitFor(driver, 'driver:init');
+
+  // PIN nou: sesiunea deschisă este închisă, iar PIN-ul vechi nu mai merge.
+  const kicked = waitFor(driver, 'disconnect');
+  const changed = await api(`/api/fleet/${id}`, { method: 'PUT', body: { plate: 'B 77 NEW', model: 'Spring', driver: 'Radu Ene', pin: '8888' } });
+  assert.equal(changed.status, 200, JSON.stringify(changed.body));
+  assert.equal(await kicked, 'io server disconnect');
+  assert.equal(await connectError({ role: 'driver', carId: id, pin: '7777' }), 'unauthorized');
+
+  // Dezactivare: dispare din dispecerat și din lista de autentificare.
+  const removed = waitFor(dispatcher, 'car:update', (c) => c.id === id && c.active === false);
+  const off = await api(`/api/fleet/${id}`, { method: 'PUT', body: { active: false } });
+  assert.equal(off.status, 200, JSON.stringify(off.body));
+  assert.equal(off.body.car.active, false);
+  await removed;
+  assert.ok(!(await (await fetch(`${baseUrl}/api/cars`)).json()).some((c) => c.id === id));
+  assert.ok((await api('/api/fleet')).body.some((c) => c.id === id && !c.active));
+
+  assert.equal((await api('/api/fleet/nu-exista', { method: 'PUT', body: { active: true } })).status, 404);
 });

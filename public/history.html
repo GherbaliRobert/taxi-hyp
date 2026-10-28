@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Istoric curse</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div id="login" class="login" hidden>
+    <form class="login-card" id="login-form">
+      <div class="brand"><div class="brand-logo">TX</div><span class="company-name">Taxi</span></div>
+      <h1>Istoric curse</h1>
+      <p class="hint">Introduceți parola dispeceratului.</p>
+      <div class="field">
+        <label for="password">Parolă</label>
+        <input class="input" id="password" type="password" autocomplete="current-password" required>
+      </div>
+      <p class="error-text" id="login-error"></p>
+      <button class="btn btn-primary btn-block" type="submit">Intră</button>
+    </form>
+  </div>
+
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="brand"><div class="brand-logo">TX</div><span class="company-name">Taxi</span></div>
+      <nav class="nav" aria-label="Pagini dispecerat">
+        <a href="/">Hartă</a>
+        <a href="/history" aria-current="page">Istoric</a>
+        <a href="/fleet">Flotă</a>
+      </nav>
+      <div class="spacer"></div>
+      <button class="btn btn-sm btn-ghost" id="logout" type="button">Ieșire</button>
+    </header>
+
+    <main class="page">
+      <form class="card filters" id="filters">
+        <div class="field">
+          <label for="from">De la</label>
+          <input class="input" id="from" type="date" required>
+        </div>
+        <div class="field">
+          <label for="to">Până la</label>
+          <input class="input" id="to" type="date" required>
+        </div>
+        <div class="field">
+          <label for="car">Mașina</label>
+          <select class="input" id="car"><option value="">Toate</option></select>
+        </div>
+        <div class="field">
+          <label for="status">Status</label>
+          <select class="input" id="status">
+            <option value="">Toate</option>
+            <option value="completed">Finalizate</option>
+            <option value="cancelled">Anulate</option>
+            <option value="active">În desfășurare</option>
+          </select>
+        </div>
+        <div class="field grow">
+          <label for="q">Caută</label>
+          <input class="input" id="q" type="search" placeholder="client, telefon sau adresă">
+        </div>
+        <div class="filter-actions">
+          <button class="btn btn-primary" type="submit">Aplică</button>
+          <button class="btn" id="export" type="button">Export Excel (CSV)</button>
+        </div>
+        <div class="quick-ranges">
+          <button class="btn btn-sm" type="button" data-range="today">Azi</button>
+          <button class="btn btn-sm" type="button" data-range="yesterday">Ieri</button>
+          <button class="btn btn-sm" type="button" data-range="7">Ultimele 7 zile</button>
+          <button class="btn btn-sm" type="button" data-range="month">Luna aceasta</button>
+          <button class="btn btn-sm" type="button" data-range="prev-month">Luna trecută</button>
+        </div>
+      </form>
+
+      <section class="stats" id="stats"></section>
+
+      <div class="history-layout" id="history-layout">
+        <section class="card table-card">
+          <div class="table-scroll">
+            <table class="table" id="rides-table">
+              <thead>
+                <tr>
+                  <th>Nr.</th>
+                  <th>Data</th>
+                  <th>Client</th>
+                  <th>Preluare</th>
+                  <th>Mașina</th>
+                  <th>Status</th>
+                  <th class="num">Așteptare</th>
+                  <th class="num">Durată</th>
+                  <th class="num">Km</th>
+                </tr>
+              </thead>
+              <tbody id="rides-body"></tbody>
+            </table>
+          </div>
+          <div class="pager" id="pager"></div>
+        </section>
+
+        <section class="card detail-card">
+          <div class="history-map" id="map"></div>
+          <div id="detail" class="detail"><p class="hint">Alegeți o cursă din tabel pentru a vedea traseul parcurs.</p></div>
+        </section>
+      </div>
+
+      <section class="card">
+        <h2 class="card-title">Pe mașini și șoferi</h2>
+        <div class="table-scroll">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Mașina</th>
+                <th>Șofer</th>
+                <th class="num">Curse</th>
+                <th class="num">Finalizate</th>
+                <th class="num">Anulate</th>
+                <th class="num">Km cu clienți</th>
+              </tr>
+            </thead>
+            <tbody id="drivers-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script src="/shared/geo.js"></script>
+  <script src="/js/common.js"></script>
+  <script src="/js/history.js"></script>
+</body>
+</html>

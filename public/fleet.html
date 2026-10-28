@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="ro">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flotă</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div id="login" class="login" hidden>
+    <form class="login-card" id="login-form">
+      <div class="brand"><div class="brand-logo">TX</div><span class="company-name">Taxi</span></div>
+      <h1>Administrare flotă</h1>
+      <p class="hint">Introduceți parola dispeceratului.</p>
+      <div class="field">
+        <label for="password">Parolă</label>
+        <input class="input" id="password" type="password" autocomplete="current-password" required>
+      </div>
+      <p class="error-text" id="login-error"></p>
+      <button class="btn btn-primary btn-block" type="submit">Intră</button>
+    </form>
+  </div>
+
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="brand"><div class="brand-logo">TX</div><span class="company-name">Taxi</span></div>
+      <nav class="nav" aria-label="Pagini dispecerat">
+        <a href="/">Hartă</a>
+        <a href="/history">Istoric</a>
+        <a href="/fleet" aria-current="page">Flotă</a>
+      </nav>
+      <div class="spacer"></div>
+      <button class="btn btn-sm btn-ghost" id="logout" type="button">Ieșire</button>
+    </header>
+
+    <main class="page narrow">
+      <div class="page-head">
+        <div>
+          <h1>Flota</h1>
+          <p class="hint" id="driver-url"></p>
+        </div>
+        <button class="btn btn-primary" id="add" type="button">+ Adaugă mașină</button>
+      </div>
+
+      <form class="card editor" id="editor" hidden novalidate>
+        <h2 class="card-title" id="editor-title">Mașină nouă</h2>
+        <div class="form-grid">
+          <div class="field">
+            <label for="plate">Număr de înmatriculare</label>
+            <input class="input" id="plate" maxlength="20" required autocomplete="off" placeholder="B 123 ABC">
+          </div>
+          <div class="field">
+            <label for="model">Model</label>
+            <input class="input" id="model" maxlength="60" autocomplete="off" placeholder="Dacia Logan">
+          </div>
+          <div class="field">
+            <label for="driver">Șofer</label>
+            <input class="input" id="driver" maxlength="80" required autocomplete="off" placeholder="Prenume Nume">
+          </div>
+          <div class="field">
+            <label for="pin">PIN șofer</label>
+            <div class="row">
+              <input class="input grow" id="pin" inputmode="numeric" maxlength="12" autocomplete="off">
+              <button class="btn" id="generate-pin" type="button">Generează</button>
+            </div>
+            <span class="hint" id="pin-hint">Între 4 și 12 cifre.</span>
+          </div>
+        </div>
+        <p class="error-text" id="editor-error"></p>
+        <div class="row">
+          <button class="btn btn-primary" type="submit">Salvează</button>
+          <button class="btn" id="cancel" type="button">Renunță</button>
+        </div>
+      </form>
+
+      <div class="result-box" id="saved" hidden></div>
+
+      <section class="card table-card">
+        <div class="table-scroll">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Mașina</th>
+                <th>Șofer</th>
+                <th>Stare</th>
+                <th>Ultima activitate</th>
+                <th class="num">Acțiuni</th>
+              </tr>
+            </thead>
+            <tbody id="cars-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/js/common.js"></script>
+  <script src="/js/fleet.js"></script>
+</body>
+</html>

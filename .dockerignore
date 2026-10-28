@@ -2,3 +2,5 @@ node_modules
 .git
 test
 *.log
+data/*.db
+data/*.db-*

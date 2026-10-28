@@ -4,7 +4,6 @@
   const { el } = UI;
   const $ = (id) => document.getElementById(id);
 
-  const PASSWORD_KEY = 'taxi.dispatcherPassword';
   const STATUS_ORDER = { free: 0, busy: 1, offline: 2 };
   const PICKUP_VISIBLE = new Set(['assigned', 'arrived']);
   const ACTIVE_RIDE = new Set(['assigned', 'arrived', 'in_progress']);
@@ -62,7 +61,7 @@
     // Timpii „acum X s” și starea „fără semnal” se recalculează periodic.
     setInterval(refreshTimes, 5000);
 
-    const saved = storage('get', PASSWORD_KEY);
+    const saved = UI.session.get();
     if (saved) connect(saved);
     else showLogin();
   }
@@ -75,7 +74,7 @@
     UI.setConnection($('conn'), 'connecting');
 
     socket.on('connect', () => {
-      storage('set', PASSWORD_KEY, password);
+      UI.session.set(password);
       showApp();
       UI.setConnection($('conn'), 'online');
     });
@@ -83,7 +82,7 @@
     socket.on('connect_error', (err) => {
       if (err.message === 'unauthorized' || err.message === 'too_many_attempts') {
         socket.disconnect();
-        storage('remove', PASSWORD_KEY);
+        UI.session.clear();
         showLogin(
           err.message === 'too_many_attempts'
             ? 'Prea multe încercări greșite. Reîncercați peste câteva minute.'
@@ -100,7 +99,7 @@
   }
 
   function logout() {
-    storage('remove', PASSWORD_KEY);
+    UI.session.clear();
     if (socket) socket.disconnect();
     location.reload();
   }
@@ -128,6 +127,9 @@
   // ---------- Mașini ----------
 
   function onSnapshot({ cars: carList, rides: rideList }) {
+    // La reconectare: mașinile dezactivate între timp nu mai apar în listă.
+    const ids = new Set(carList.map((c) => c.id));
+    for (const id of [...cars.keys()]) if (!ids.has(id)) removeCar(id);
     for (const car of carList) upsertCar(car);
     rides.clear();
     for (const ride of rideList) rides.set(ride.id, ride);
@@ -143,6 +145,12 @@
   }
 
   function onCarUpdate(car) {
+    if (car.active === false) {
+      removeCar(car.id);
+      renderCarList();
+      if (activeTab === 'new') refreshCarSelect();
+      return;
+    }
     const prev = upsertCar(car);
     if (!prev || prev.status !== car.status || prev.rideId !== car.rideId) {
       renderCarList();
@@ -192,6 +200,15 @@
       if (entry.marker.isPopupOpen()) entry.marker.setPopupContent(carPopup(car));
     }
     return prev;
+  }
+
+  function removeCar(id) {
+    const entry = cars.get(id);
+    if (!entry) return;
+    if (entry.marker) entry.marker.remove();
+    entry.trail.remove();
+    cars.delete(id);
+    if (selectedCarId === id) selectedCarId = null;
   }
 
   function statusColor(status) {
@@ -640,16 +657,5 @@
 
   function coords(p) {
     return p.lat.toFixed(5) + ', ' + p.lng.toFixed(5);
-  }
-
-  function storage(action, key, value) {
-    try {
-      if (action === 'get') return sessionStorage.getItem(key);
-      if (action === 'set') sessionStorage.setItem(key, value);
-      if (action === 'remove') sessionStorage.removeItem(key);
-    } catch {
-      return null;
-    }
-    return null;
   }
 })();

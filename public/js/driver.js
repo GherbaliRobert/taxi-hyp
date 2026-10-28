@@ -90,7 +90,15 @@
       // Trimitem imediat ultima poziție cunoscută, ca mașina să apară pe hartă fără întârziere.
       if (lastFix) sendLocation(true);
     });
-    socket.on('disconnect', () => UI.setConnection($('conn'), 'offline'));
+    socket.on('disconnect', (reason) => {
+      UI.setConnection($('conn'), 'offline');
+      // Serverul a închis sesiunea: PIN schimbat sau mașină dezactivată de dispecerat.
+      if (reason === 'io server disconnect') {
+        clearCredentials();
+        stopGps();
+        showLogin('Sesiunea a fost închisă de dispecerat (PIN schimbat sau mașină dezactivată). Intrați din nou.');
+      }
+    });
     socket.on('connect_error', (err) => {
       if (err.message === 'unauthorized' || err.message === 'too_many_attempts') {
         socket.disconnect();

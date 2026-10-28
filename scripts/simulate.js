@@ -5,6 +5,7 @@
 //   npm run simulate                    toate mașinile, pe străzi (rutare OSRM)
 //   npm run simulate -- --cars 3        doar primele 3 mașini
 //   npm run simulate -- --straight      fără rutare pe străzi (linie dreaptă)
+//   npm run simulate -- --speed 3       demo accelerat (mașinile merg de 3 ori mai repede)
 //   npm run simulate -- --url http://server:3000
 
 const path = require('path');
@@ -21,6 +22,8 @@ const CENTER = {
 const AREA_RADIUS_M = 4000;
 const TICK_MS = 1000;
 const USE_ROADS = !args.straight;
+// Peste ~4× vitezele ar depăși filtrul de salturi GPS din kilometraj (216 km/h).
+const SPEED_FACTOR = Math.min(4, Math.max(1, Number(args.speed) || 1));
 const OSRM_URL = process.env.OSRM_URL || 'https://router.project-osrm.org';
 
 const allCars = loadCars(process.env.CARS_FILE || path.join(__dirname, '..', 'data', 'cars.json'));
@@ -124,7 +127,7 @@ class SimulatedCar {
     if (version !== this.planVersion) return;
     this.route = route;
     this.routing = false;
-    this.speed = rand(8, 13); // 30–47 km/h
+    this.speed = rand(8, 13) * SPEED_FACTOR; // 30–47 km/h în modul normal
   }
 
   cruise() {
@@ -135,7 +138,7 @@ class SimulatedCar {
   onRide(ride) {
     if (ride.status === 'completed' || ride.status === 'cancelled') {
       if (this.ride && this.ride.id === ride.id) {
-        this.log(`cursa #${ride.id} ${ride.status === 'cancelled' ? 'anulată' : 'încheiată'} de dispecerat`);
+        this.log(`cursa #${ride.id} ${ride.status === 'cancelled' ? 'anulată de dispecerat' : 'încheiată'}`);
         this.ride = null;
         this.cruise();
       }
@@ -187,7 +190,7 @@ class SimulatedCar {
         this.log(`a ajuns la client (cursa #${rideId})`);
         this.setRideStatus('arrived');
         this.phase = 'boarding';
-        this.waitUntil = Date.now() + rand(6000, 12000);
+        this.waitUntil = Date.now() + rand(6000, 12000) / SPEED_FACTOR;
         break;
       case 'boarding':
         this.log(`client preluat (cursa #${rideId})`);
@@ -199,7 +202,7 @@ class SimulatedCar {
         this.log(`cursa #${rideId} finalizată`);
         this.setRideStatus('completed');
         this.ride = null;
-        this.waitUntil = Date.now() + rand(3000, 8000);
+        this.waitUntil = Date.now() + rand(3000, 8000) / SPEED_FACTOR;
         this.cruise();
         break;
       default:
@@ -229,7 +232,8 @@ class SimulatedCar {
 }
 
 async function main() {
-  console.log(`Simulez ${cars.length} mașini către ${SERVER_URL}${USE_ROADS ? '' : ' (linie dreaptă)'}`);
+  const mode = [USE_ROADS ? '' : 'linie dreaptă', SPEED_FACTOR > 1 ? `viteză ×${SPEED_FACTOR}` : ''].filter(Boolean);
+  console.log(`Simulez ${cars.length} mașini către ${SERVER_URL}${mode.length ? ` (${mode.join(', ')})` : ''}`);
   const sims = [];
   for (const car of cars) {
     const sim = new SimulatedCar(car);

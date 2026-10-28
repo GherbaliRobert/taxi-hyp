@@ -166,12 +166,133 @@
     setTimeout(() => item.remove(), 4000);
   }
 
+  // ---------- Paginile dispeceratului: parola se ține doar pe durata sesiunii (tab-ului) ----------
+
+  const PASSWORD_KEY = 'taxi.dispatcherPassword';
+  const session = {
+    get() {
+      try {
+        return sessionStorage.getItem(PASSWORD_KEY);
+      } catch {
+        return null;
+      }
+    },
+    set(value) {
+      try {
+        sessionStorage.setItem(PASSWORD_KEY, value);
+      } catch {
+        // Fără sessionStorage parola se cere la fiecare pagină.
+      }
+    },
+    clear() {
+      try {
+        sessionStorage.removeItem(PASSWORD_KEY);
+      } catch {
+        // ignorat
+      }
+    },
+  };
+
+  /** Apel către API-ul dispeceratului; aruncă o eroare cu `status` la răspunsuri negative. */
+  async function api(path, options) {
+    const { method = 'GET', body } = options || {};
+    const headers = { Authorization: 'Bearer ' + (session.get() || '') };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    const res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    let data = null;
+    try {
+      data = await res.json();
+    } catch {
+      data = null;
+    }
+    if (!res.ok) {
+      const error = new Error((data && data.error) || 'Eroare ' + res.status);
+      error.status = res.status;
+      throw error;
+    }
+    return data;
+  }
+
+  /**
+   * Autentificarea pentru paginile care folosesc API-ul (istoric, flotă).
+   * `start` încarcă datele paginii; dacă parola lipsește sau e greșită, se afișează formularul.
+   * `onShown` rulează după ce pagina devine vizibilă (ex. pentru a redimensiona harta).
+   */
+  function requireDispatcher(start, onShown) {
+    const $ = (id) => document.getElementById(id);
+    const showLogin = (message) => {
+      $('app').hidden = true;
+      $('login').hidden = false;
+      $('login-error').textContent = message || '';
+      $('password').value = '';
+      $('password').focus();
+    };
+    async function attempt(fromForm) {
+      try {
+        await start();
+        $('login').hidden = true;
+        $('app').hidden = false;
+        if (onShown) onShown();
+      } catch (err) {
+        if (err.status === 401 || err.status === 429) {
+          session.clear();
+          showLogin(err.status === 429 ? err.message : fromForm ? 'Parolă greșită.' : '');
+        } else {
+          $('login').hidden = true;
+          $('app').hidden = false;
+          if (onShown) onShown();
+          toast(err.message, 'error');
+        }
+      }
+    }
+    $('login-form').addEventListener('submit', (e) => {
+      e.preventDefault();
+      session.set($('password').value);
+      attempt(true);
+    });
+    $('logout').addEventListener('click', () => {
+      session.clear();
+      location.reload();
+    });
+    if (session.get()) attempt(false);
+    else showLogin();
+  }
+
+  function formatDateTime(ts) {
+    return new Date(ts).toLocaleString('ro-RO', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+  }
+
+  function formatMinutes(ms) {
+    if (ms === null || ms === undefined || !Number.isFinite(ms)) return '—';
+    if (ms < 60000) return '< 1 min';
+    const minutes = Math.round(ms / 60000);
+    if (minutes < 60) return minutes + ' min';
+    return Math.floor(minutes / 60) + ' h ' + (minutes % 60) + ' min';
+  }
+
+  function formatKm(meters) {
+    return (meters / 1000).toLocaleString('ro-RO', { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + ' km';
+  }
+
+  async function setCompanyName() {
+    const config = await loadConfig();
+    document.querySelectorAll('.company-name').forEach((n) => (n.textContent = config.companyName));
+    return config;
+  }
+
   window.TaxiUI = {
     CAR_STATUS_LABELS,
     RIDE_STATUS_LABELS,
     escapeHtml,
     el,
     loadConfig,
+    setCompanyName,
     createMap,
     carIcon,
     pickupIcon,
@@ -180,8 +301,14 @@
     isStale,
     timeAgo,
     formatTime,
+    formatDateTime,
+    formatMinutes,
+    formatKm,
     setConnection,
     copyText,
     toast,
+    session,
+    api,
+    requireDispatcher,
   };
 })();
