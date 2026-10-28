@@ -407,15 +407,17 @@
           )
         : null;
 
-    card.replaceChildren(
+    // replaceChildren() ar afișa „null” pentru câmpurile lipsă, așa că le filtrăm.
+    const content = [
       el('div', { class: 'gps-line' }, el('h2', {}, 'Cursa #' + ride.id), el('span', { class: 'badge', dataset: { status: ride.status } }, UI.RIDE_STATUS_LABELS[ride.status])),
       el('div', { class: 'address' }, ride.address || 'Punct pe hartă: ' + lat.toFixed(5) + ', ' + lng.toFixed(5)),
       el('div', {}, 'Client: ', el('strong', {}, ride.customerName)),
       ride.phone ? el('div', {}, 'Telefon: ', el('a', { href: 'tel:' + ride.phone }, ride.phone)) : null,
       ride.notes ? el('div', {}, 'Observații: ' + ride.notes) : null,
       navigation,
-      el('div', { class: 'grid' }, buttons)
-    );
+      el('div', { class: 'grid' }, buttons),
+    ];
+    card.replaceChildren(...content.filter(Boolean));
     card.hidden = false;
 
     if (map && ride.status !== 'in_progress') {
